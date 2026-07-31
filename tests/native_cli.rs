@@ -5,12 +5,15 @@ use std::process::{Command, Output};
 const COMMANDS: &[&str] = &[
     "justaudio",
     "justavif",
+    "justcrop",
+    "justjpg",
     "justjson",
     "justmp3",
     "justpdf",
     "justpng",
     "justport",
     "justqr",
+    "justresize",
     "justrmbg",
     "justsvg",
     "justvideo",
@@ -185,6 +188,302 @@ fn zip_uses_the_git_file_set_and_writes_a_readable_archive() {
     assert!(archive.by_name("keep.txt").is_ok());
     assert!(archive.by_name(".gitignore").is_ok());
     assert!(archive.by_name("ignored.tmp").is_err());
+}
+
+#[test]
+fn resize_preserves_aspect_ratio_and_keeps_the_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("wide.png");
+    let output = directory.path().join("resized");
+    image::RgbaImage::from_pixel(400, 200, image::Rgba([20, 80, 160, 200]))
+        .save(&input)
+        .unwrap();
+
+    let result = Command::new(binary())
+        .arg("resize")
+        .arg(&input)
+        .args(["--width", "100", "--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "justresize failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(input.is_file());
+    assert_eq!(
+        image::image_dimensions(output.join("wide.png")).unwrap(),
+        (100, 50)
+    );
+}
+
+#[test]
+fn crop_trims_to_the_nontransparent_alpha_bounds() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("padded.png");
+    let output = directory.path().join("cropped");
+    let mut image = image::RgbaImage::from_pixel(100, 80, image::Rgba([0, 0, 0, 0]));
+    for y in 10..60 {
+        for x in 20..70 {
+            image.put_pixel(x, y, image::Rgba([20, 80, 160, 255]));
+        }
+    }
+    image.save(&input).unwrap();
+
+    let result = Command::new(binary())
+        .arg("crop")
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "justcrop failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(input.is_file());
+    let cropped = image::open(output.join("padded.png")).unwrap().to_rgba8();
+    assert_eq!(cropped.dimensions(), (50, 50));
+    assert_eq!(cropped.get_pixel(0, 0).0, [20, 80, 160, 255]);
+    assert_eq!(cropped.get_pixel(49, 49).0, [20, 80, 160, 255]);
+}
+
+#[test]
+fn crop_preserves_sixteen_bit_precision_and_tiny_nonzero_alpha() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("rgba16.png");
+    let output = directory.path().join("cropped");
+    let mut image = image::ImageBuffer::from_pixel(8, 6, image::Rgba([0_u16, 0, 0, 0]));
+    for y in 2..5 {
+        for x in 3..7 {
+            image.put_pixel(x, y, image::Rgba([60_000, 30_000, 10_000, 1]));
+        }
+    }
+    image::DynamicImage::ImageRgba16(image)
+        .save(&input)
+        .unwrap();
+
+    let result = Command::new(binary())
+        .arg("crop")
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "16-bit justcrop failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cropped = image::open(output.join("rgba16.png")).unwrap();
+    assert_eq!(cropped.color(), image::ColorType::Rgba16);
+    assert_eq!((cropped.width(), cropped.height()), (4, 3));
+    assert_eq!(
+        cropped.to_rgba16().get_pixel(0, 0).0,
+        [60_000, 30_000, 10_000, 1]
+    );
+}
+
+#[test]
+fn jpg_optimizes_and_composites_transparency_onto_white() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("transparent.png");
+    let output = directory.path().join("jpg");
+    let mut image = image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 0]));
+    for y in 16..48 {
+        for x in 16..48 {
+            image.put_pixel(x, y, image::Rgba([240, 20, 10, 255]));
+        }
+    }
+    image.save(&input).unwrap();
+
+    let result = Command::new(binary())
+        .arg("jpg")
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "justjpg failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(input.is_file());
+    let encoded = fs::read(output.join("transparent.jpg")).unwrap();
+    assert_eq!(&encoded[..2], &[0xff, 0xd8]);
+    let decoded = image::open(output.join("transparent.jpg"))
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(decoded.dimensions(), (64, 64));
+    let corner = decoded.get_pixel(2, 2).0;
+    assert!(corner.iter().all(|channel| *channel > 240), "{corner:?}");
+    let center = decoded.get_pixel(32, 32).0;
+    assert!(
+        center[0] > 200 && center[1] < 60 && center[2] < 60,
+        "{center:?}"
+    );
+}
+
+#[test]
+fn image_tool_dry_runs_do_not_create_output_directories() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("image.png");
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 80, 160, 128]))
+        .save(&input)
+        .unwrap();
+
+    for tool in ["crop", "jpg"] {
+        let output = directory.path().join(format!("{tool}-output"));
+        let result = Command::new(binary())
+            .arg(tool)
+            .arg(&input)
+            .args(["--output"])
+            .arg(&output)
+            .arg("--dry-run")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "just{tool} dry run failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!output.exists(), "just{tool} dry run created output");
+    }
+}
+
+#[test]
+fn jpg_replace_converts_then_removes_a_non_jpeg_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("replace-me.png");
+    image::RgbImage::from_pixel(24, 12, image::Rgb([20, 80, 160]))
+        .save(&input)
+        .unwrap();
+
+    let result = Command::new(binary())
+        .arg("jpg")
+        .arg(&input)
+        .arg("--replace")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "justjpg --replace failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!input.exists());
+    assert_eq!(
+        image::image_dimensions(directory.path().join("replace-me.jpg")).unwrap(),
+        (24, 12)
+    );
+}
+
+#[test]
+fn jpg_replace_keeps_a_jpeg_extension_and_does_not_touch_its_sibling() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("photo.jpeg");
+    let sibling = directory.path().join("photo.jpg");
+    image::RgbImage::from_pixel(24, 12, image::Rgb([20, 80, 160]))
+        .save(&input)
+        .unwrap();
+    fs::write(&sibling, b"unselected sibling").unwrap();
+
+    let result = Command::new(binary())
+        .arg("jpg")
+        .arg(&input)
+        .arg("--replace")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "justjpg .jpeg replacement failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(image::image_dimensions(&input).unwrap(), (24, 12));
+    assert_eq!(fs::read(&sibling).unwrap(), b"unselected sibling");
+}
+
+#[cfg(windows)]
+#[test]
+#[allow(clippy::permissions_set_readonly_false)]
+fn crop_replace_preserves_the_windows_readonly_attribute() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("readonly.png");
+    let mut image = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 0]));
+    image.put_pixel(4, 4, image::Rgba([20, 80, 160, 255]));
+    image.save(&input).unwrap();
+    let mut permissions = fs::metadata(&input).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&input, permissions).unwrap();
+
+    let result = Command::new(binary())
+        .arg("crop")
+        .arg(&input)
+        .arg("--replace")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "read-only justcrop failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fs::metadata(&input).unwrap().permissions().readonly());
+    let mut permissions = fs::metadata(&input).unwrap().permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(&input, permissions).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn jpg_replace_returns_failure_when_the_source_cannot_be_removed() {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("locked.png");
+    image::RgbImage::from_pixel(24, 12, image::Rgb([20, 80, 160]))
+        .save(&input)
+        .unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&input)
+        .unwrap();
+
+    let result = Command::new(binary())
+        .arg("jpg")
+        .arg(&input)
+        .arg("--replace")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(input.is_file());
+    assert!(directory.path().join("locked.jpg").is_file());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("source could not be removed"));
+    drop(lock);
+}
+
+#[test]
+fn jpg_output_directory_cannot_silently_overwrite_its_input() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("source.jpg");
+    image::RgbImage::from_pixel(24, 12, image::Rgb([20, 80, 160]))
+        .save(&input)
+        .unwrap();
+    let before = fs::read(&input).unwrap();
+
+    let result = Command::new(binary())
+        .arg("jpg")
+        .arg(&input)
+        .arg("--output")
+        .arg(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("use --replace"));
+    assert_eq!(fs::read(&input).unwrap(), before);
 }
 
 #[test]

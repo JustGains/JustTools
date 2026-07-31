@@ -37,12 +37,15 @@ If the install directory is not on `PATH`, the `just` browser offers
 | `just` | Browse or directly dispatch every command; offer Add To Path when needed |
 | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; keep the source |
 | `justavif` | AV1 still image, quality 60, speed 6; install only when smaller |
+| `justcrop` | Trim transparent borders to nonzero-alpha bounds; preserve format and source |
+| `justjpg` | Quality 85 progressive 4:2:0 JPEG, optimized Huffman tables, white alpha background |
 | `justjson` | Pretty-print in place with two spaces and a final newline |
 | `justmp3` | LAME VBR quality 2, 48 kHz; keep the source |
 | `justpdf` | Show info for one PDF or merge several into `merged.pdf` |
 | `justpng` | pngquant quality 65-90, speed 3; replace only when smaller |
 | `justport` | Show the owner of exact local ports; guarded same-user kill is optional |
 | `justqr` | 1024 px, error-Q, four-module margin, black-on-white `qr.png` |
+| `justresize` | Fit still images within 1920x1920, never upscale, preserve format and source |
 | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 removal to `<name>-nobg.png` |
 | `justsvg` | Conservative multipass SVGOMG-style optimization, precision 3 |
 | `justvideo` | 720p H.264 MP4, CRF 28, medium preset, AAC 128 kb/s |
@@ -54,6 +57,9 @@ Run `just`, `just --help`, or `just help qr`. Short dispatch stays quick:
 
 ```sh
 just qr "https://example.com"
+just crop transparent-logo.png
+just jpg photo.png
+just resize photo.jpg --width 1200
 just json package.json
 just pdf report-a.pdf report-b.pdf
 just mp3 interview.mov
@@ -77,6 +83,15 @@ just rmbg portrait.jpg
   a beside-source original only after a smaller replacement is complete.
 - APNG, animated WebP/AVIF, multi-page TIFF, and AVIF transparency are rejected
   where a still-image conversion would silently discard content.
+- Crop applies EXIF orientation, trims to alpha values above the selected
+  threshold, clamps optional padding to the original canvas, and reduces fully
+  transparent canvases to a valid 1x1 transparent image.
+- JPG applies EXIF orientation, composites transparency onto white by default,
+  writes progressive 4:2:0 output with optimized Huffman tables, and strips
+  metadata. Quality 90+ switches to full 4:4:4 chroma. Use `--background`,
+  `--quality`, or `--baseline` when needed.
+- Resize applies EXIF orientation, uses Lanczos3, strips metadata, and preserves
+  aspect ratio unless exact center-cropping is explicitly selected.
 - PDF inputs are never deleted. Page ranges are one-based, such as
   `1-3,5,last`.
 - ZIP paths, symlinks, output self-inclusion, Git submodules, and ZIP64 files
@@ -90,10 +105,14 @@ command's `--help` for its exact batch behavior.
 conservative preset preserves IDs, `viewBox`, titles, descriptions, XML
 namespaces, and accessibility attributes.
 
+Third-party attribution for the native JPEG encoder ships in
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) and every release archive.
+
 ## Dependencies: discover, explain, confirm
 
-Pure-Rust JSON, PDF, QR, SVG, and port operations have no external runtime
-dependencies. Other commands resolve dependencies only when invoked:
+Pure-Rust crop, JPG, JSON, PDF, QR, resize, SVG, and port operations have no
+external runtime dependencies. Other commands resolve dependencies only when
+invoked:
 
 | Commands | Dependency | Confirmed acquisition |
 | --- | --- | --- |
@@ -143,6 +162,27 @@ requires a separate agreement; review the
 [BRIA model card and license](https://huggingface.co/briaai/RMBG-2.0) before
 using the downloaded weights.
 
+## Agent skill
+
+The repository includes an installable `justtools` Agent Skill at
+`skills/justtools`. The [`skills` npm CLI](https://www.npmjs.com/package/skills)
+discovers it directly from GitHub:
+
+```sh
+npx skills add JustGains/JustTools --skill justtools
+```
+
+Target specific agents or install globally when desired:
+
+```sh
+npx skills add JustGains/JustTools --skill justtools --agent codex --agent claude-code
+npx skills add JustGains/JustTools --skill justtools --agent codex --global
+```
+
+Use `npx skills add . --skill justtools` from a local clone while developing the
+skill. Set `DISABLE_TELEMETRY=1` if you do not want the installer's anonymous
+usage telemetry.
+
 ## Development and releases
 
 ```sh
@@ -155,8 +195,15 @@ cargo build --locked --release -p justtools
 
 The test suite exercises every advertised command through the root binary,
 native alias installation and rollback, non-interactive dependency refusal,
-real JSON/PDF/QR/SVG/port behavior, Git-accurate ZIP creation, media safety, and
-offline RMBG acquisition logic. CI also checks the Rust 1.90 minimum and builds
+real JSON/PDF/QR/SVG/port behavior, Git-accurate ZIP creation, media safety,
+native crop/JPG/resize behavior, and offline RMBG acquisition logic. CI also
+checks the Rust 1.90 minimum and builds
 native release archives for Windows x64/ARM64, Linux x64/ARM64 on an Ubuntu
 22.04 compatibility baseline, and macOS Intel/Apple Silicon. Unix artifacts are
-tarred so executable permissions survive artifact transport.
+tarred so executable permissions survive artifact transport. Workflow actions
+use their current Node 24-based major releases.
+
+Every push and pull request keeps its native archives on the Actions run. A
+version tag matching `Cargo.toml`, such as `v2.2.0`, additionally creates a
+GitHub Release and attaches all six archives. Re-running the release job safely
+replaces its existing assets.

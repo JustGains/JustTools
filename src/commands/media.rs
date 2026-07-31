@@ -1,5 +1,6 @@
 use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
@@ -770,20 +771,61 @@ fn dependency_executable(mode: MediaMode) -> ToolResult<PathBuf> {
     deps::require(mode.tool(), text)
 }
 
-fn animated_png(path: &Path) -> bool {
-    fs::read(path).ok().is_some_and(|bytes| {
-        bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
-            && bytes.windows(4).any(|window| window == b"acTL")
-    })
+pub(crate) fn animated_png(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut signature = [0_u8; 8];
+    if file.read_exact(&mut signature).is_err() || signature != [137, 80, 78, 71, 13, 10, 26, 10] {
+        return false;
+    }
+    loop {
+        let mut header = [0_u8; 8];
+        if file.read_exact(&mut header).is_err() {
+            return false;
+        }
+        let length = u32::from_be_bytes(header[0..4].try_into().expect("four bytes"));
+        let kind = &header[4..8];
+        if kind == b"acTL" {
+            return true;
+        }
+        if kind == b"IDAT" || kind == b"IEND" {
+            return false;
+        }
+        if file.seek(SeekFrom::Current(i64::from(length) + 4)).is_err() {
+            return false;
+        }
+    }
 }
 
-fn animated_webp(path: &Path) -> bool {
-    fs::read(path).ok().is_some_and(|bytes| {
-        bytes.starts_with(b"RIFF")
-            && bytes.get(8..12) == Some(b"WEBP")
-            && (bytes.windows(4).any(|window| window == b"ANIM")
-                || bytes.windows(4).any(|window| window == b"ANMF"))
-    })
+pub(crate) fn animated_webp(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut header = [0_u8; 12];
+    if file.read_exact(&mut header).is_err()
+        || &header[0..4] != b"RIFF"
+        || &header[8..12] != b"WEBP"
+    {
+        return false;
+    }
+    loop {
+        let mut chunk = [0_u8; 8];
+        if file.read_exact(&mut chunk).is_err() {
+            return false;
+        }
+        if &chunk[0..4] == b"ANIM" || &chunk[0..4] == b"ANMF" {
+            return true;
+        }
+        let length = u32::from_le_bytes(chunk[4..8].try_into().expect("four bytes"));
+        let padded = u64::from(length) + u64::from(length % 2);
+        let Ok(offset) = i64::try_from(padded) else {
+            return false;
+        };
+        if file.seek(SeekFrom::Current(offset)).is_err() {
+            return false;
+        }
+    }
 }
 
 fn ffprobe_for(ffmpeg: &Path) -> Option<PathBuf> {
@@ -860,56 +902,56 @@ fn assert_single_frame_avif(ffmpeg: &Path, source: &Path) -> ToolResult {
     Ok(())
 }
 
-fn multipage_tiff(path: &Path) -> bool {
-    let Ok(bytes) = fs::read(path) else {
+pub(crate) fn multipage_tiff(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
         return false;
     };
-    if bytes.len() < 8 {
+    let mut header = [0_u8; 8];
+    if file.read_exact(&mut header).is_err() {
         return false;
     }
-    let little = &bytes[0..2] == b"II";
-    if !little && &bytes[0..2] != b"MM" {
+    let little = &header[0..2] == b"II";
+    if !little && &header[0..2] != b"MM" {
         return false;
     }
-    let read16 = |offset: usize| -> Option<u16> {
-        let value: [u8; 2] = bytes.get(offset..offset + 2)?.try_into().ok()?;
-        Some(if little {
-            u16::from_le_bytes(value)
+    let read16 = |bytes: [u8; 2]| {
+        if little {
+            u16::from_le_bytes(bytes)
         } else {
-            u16::from_be_bytes(value)
-        })
+            u16::from_be_bytes(bytes)
+        }
     };
-    let read32 = |offset: usize| -> Option<u32> {
-        let value: [u8; 4] = bytes.get(offset..offset + 4)?.try_into().ok()?;
-        Some(if little {
-            u32::from_le_bytes(value)
+    let read32 = |bytes: [u8; 4]| {
+        if little {
+            u32::from_le_bytes(bytes)
         } else {
-            u32::from_be_bytes(value)
-        })
+            u32::from_be_bytes(bytes)
+        }
     };
-    if read16(2) != Some(42) {
+    if read16(header[2..4].try_into().expect("two bytes")) != 42 {
         return false;
     }
-    let Some(first) = read32(4).map(|value| value as usize) else {
+    let first = read32(header[4..8].try_into().expect("four bytes"));
+    if file.seek(SeekFrom::Start(u64::from(first))).is_err() {
         return false;
-    };
-    let Some(count) = read16(first).map(|value| value as usize) else {
+    }
+    let mut count_bytes = [0_u8; 2];
+    if file.read_exact(&mut count_bytes).is_err() {
         return false;
-    };
-    read32(
-        first
-            .saturating_add(2)
-            .saturating_add(count.saturating_mul(12)),
-    )
-    .is_some_and(|next| next != 0)
+    }
+    let count = u64::from(read16(count_bytes));
+    let next_offset = u64::from(first)
+        .saturating_add(2)
+        .saturating_add(count.saturating_mul(12));
+    if file.seek(SeekFrom::Start(next_offset)).is_err() {
+        return false;
+    }
+    let mut next = [0_u8; 4];
+    file.read_exact(&mut next).is_ok() && read32(next) != 0
 }
 
 fn assert_safe(mode: MediaMode, source: &Path) -> ToolResult {
-    let ext = extension(source);
-    if matches!(mode, MediaMode::Png | MediaMode::Webp | MediaMode::Avif)
-        && ext == ".png"
-        && animated_png(source)
-    {
+    if matches!(mode, MediaMode::Png | MediaMode::Webp | MediaMode::Avif) && animated_png(source) {
         return Err(ToolError::new(
             mode.tool(),
             format!(
@@ -918,8 +960,7 @@ fn assert_safe(mode: MediaMode, source: &Path) -> ToolResult {
             ),
         ));
     }
-    if matches!(mode, MediaMode::Webp | MediaMode::Avif) && ext == ".webp" && animated_webp(source)
-    {
+    if matches!(mode, MediaMode::Webp | MediaMode::Avif) && animated_webp(source) {
         return Err(ToolError::new(
             mode.tool(),
             format!(
@@ -928,10 +969,7 @@ fn assert_safe(mode: MediaMode, source: &Path) -> ToolResult {
             ),
         ));
     }
-    if matches!(mode, MediaMode::Webp | MediaMode::Avif)
-        && matches!(ext.as_str(), ".tif" | ".tiff")
-        && multipage_tiff(source)
-    {
+    if matches!(mode, MediaMode::Webp | MediaMode::Avif) && multipage_tiff(source) {
         return Err(ToolError::new(
             mode.tool(),
             format!(

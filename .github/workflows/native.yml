@@ -2,6 +2,10 @@ name: Native builds
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -13,7 +17,7 @@ jobs:
     name: Rust 1.90 minimum
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install declared minimum Rust
         run: rustup toolchain install 1.90.0 --profile minimal --no-self-update
       - name: Check the complete workspace at MSRV
@@ -60,7 +64,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Use stable Rust
         shell: bash
@@ -86,7 +90,7 @@ jobs:
         run: |
           $stage = "dist/${{ matrix.artifact }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target/release/${{ matrix.executable }}", README.md, LICENSE -Destination $stage
+          Copy-Item "target/release/${{ matrix.executable }}", README.md, LICENSE, THIRD_PARTY_LICENSES.md -Destination $stage
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/${{ matrix.artifact }}.zip"
 
       - name: Package Unix artifact with executable mode
@@ -96,11 +100,83 @@ jobs:
           stage="dist/${{ matrix.artifact }}"
           mkdir -p "$stage"
           install -m 0755 "target/release/${{ matrix.executable }}" "$stage/just"
-          install -m 0644 README.md LICENSE "$stage/"
+          install -m 0644 README.md LICENSE THIRD_PARTY_LICENSES.md "$stage/"
           tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C "$stage" .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.${{ matrix.archive }}
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - msrv
+      - build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify version tag
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          expected="v${version}"
+          if [[ "$GITHUB_REF_NAME" != "$expected" ]]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match Cargo.toml version $expected"
+            exit 1
+          fi
+
+      - name: Download native archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: justtools-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release archives
+        shell: bash
+        run: |
+          expected=(
+            justtools-windows-x64.zip
+            justtools-windows-arm64.zip
+            justtools-linux-x64.tar.gz
+            justtools-linux-arm64.tar.gz
+            justtools-macos-arm64.tar.gz
+            justtools-macos-x64.tar.gz
+          )
+          for archive in "${expected[@]}"; do
+            if [[ ! -s "dist/$archive" ]]; then
+              echo "::error::Missing or empty release archive: $archive"
+              exit 1
+            fi
+          done
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="JustTools $GITHUB_REF_NAME"
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease+=(--prerelease)
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "$title" \
+              "${prerelease[@]}"
+          fi

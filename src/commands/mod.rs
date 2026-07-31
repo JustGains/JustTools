@@ -5,12 +5,16 @@ use crate::error::{ToolError, ToolResult};
 pub mod audio;
 pub mod avif;
 mod core_port;
+pub mod crop;
+mod image_ops;
+pub mod jpg;
 pub mod json;
 mod media;
 pub mod pdf;
 pub mod png;
 pub mod port;
 pub mod qr;
+pub mod resize;
 pub mod rmbg;
 pub mod svg;
 pub mod video;
@@ -31,6 +35,14 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "justavif",
         description: "convert still images to compact AVIF files",
+    },
+    CommandInfo {
+        name: "justcrop",
+        description: "trim transparent image borders to their alpha bounds",
+    },
+    CommandInfo {
+        name: "justjpg",
+        description: "create optimized progressive JPEG files",
     },
     CommandInfo {
         name: "justjson",
@@ -55,6 +67,10 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "justqr",
         description: "generate a ready-to-scan QR code",
+    },
+    CommandInfo {
+        name: "justresize",
+        description: "resize still images with safe web-ready defaults",
     },
     CommandInfo {
         name: "justrmbg",
@@ -92,6 +108,8 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> ToolResult {
         "justmp3" => audio::run(audio::Mode::Mp3, args),
         "justwav" => audio::run(audio::Mode::Wav, args),
         "justavif" => avif::run(args),
+        "justcrop" => crop::run(args),
+        "justjpg" => jpg::run(args),
         "justpng" => png::run(args),
         "justvideo" => video::run(args),
         "justwebp" => webp::run(args),
@@ -100,6 +118,7 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> ToolResult {
         "justpdf" => pdf::run(args),
         "justport" => port::run(args),
         "justqr" => qr::run(args),
+        "justresize" => resize::run(args),
         "justrmbg" => rmbg::run(args),
         "justsvg" => svg::run(args),
         _ => Err(ToolError::usage("just", format!("unknown tool: {command}"))),
