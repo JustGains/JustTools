@@ -1,0 +1,52 @@
+[package]
+name = "justtools"
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Fast, opinionated, cross-platform just* command-line tools"
+license = "MIT"
+
+[workspace]
+members = ["ports/core-tools"]
+default-members = ["."]
+resolver = "3"
+
+[[bin]]
+name = "just"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+atomic-write-file = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ctrlc = "3.4"
+dialoguer = { version = "0.11", default-features = false }
+directories = "6.0"
+flate2 = "1.1"
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "qoi", "tiff", "webp"] }
+justtools-core = { path = "ports/core-tools" }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-22", "coreml", "cuda", "directml", "load-dynamic", "std"] }
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3.20"
+thiserror = "2.0"
+ureq = "3.3"
+walkdir = "2.5"
+zip = { version = "4.3", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+winreg = "0.55"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

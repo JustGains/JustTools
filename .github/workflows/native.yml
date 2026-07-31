@@ -1,0 +1,106 @@
+name: Native builds
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  msrv:
+    name: Rust 1.90 minimum
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install declared minimum Rust
+        run: rustup toolchain install 1.90.0 --profile minimal --no-self-update
+      - name: Check the complete workspace at MSRV
+        run: cargo +1.90.0 check --locked --workspace --all-targets
+
+  build:
+    name: ${{ matrix.name }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+            artifact: justtools-windows-x64
+            executable: just.exe
+            archive: zip
+          - name: Windows ARM64
+            os: windows-11-arm
+            artifact: justtools-windows-arm64
+            executable: just.exe
+            archive: zip
+          - name: Linux x64 (glibc 2.35 baseline)
+            os: ubuntu-22.04
+            artifact: justtools-linux-x64
+            executable: just
+            archive: tar.gz
+          - name: Linux ARM64 (glibc 2.35 baseline)
+            os: ubuntu-22.04-arm
+            artifact: justtools-linux-arm64
+            executable: just
+            archive: tar.gz
+          - name: macOS Apple Silicon
+            os: macos-15
+            artifact: justtools-macos-arm64
+            executable: just
+            archive: tar.gz
+          - name: macOS Intel
+            os: macos-15-intel
+            artifact: justtools-macos-x64
+            executable: just
+            archive: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint every target
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test every target
+        run: cargo test --locked --workspace --all-targets
+
+      - name: Build release executable
+        run: cargo build --locked --release -p justtools
+
+      - name: Package Windows artifact
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $stage = "dist/${{ matrix.artifact }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/release/${{ matrix.executable }}", README.md, LICENSE -Destination $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/${{ matrix.artifact }}.zip"
+
+      - name: Package Unix artifact with executable mode
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          stage="dist/${{ matrix.artifact }}"
+          mkdir -p "$stage"
+          install -m 0755 "target/release/${{ matrix.executable }}" "$stage/just"
+          install -m 0644 README.md LICENSE "$stage/"
+          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C "$stage" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.${{ matrix.archive }}
+          if-no-files-found: error

@@ -1,37 +1,162 @@
 # JustTools
 
-Source of truth for the `just*` command-line tools. The deployed copies live in
-`C:\cmd\bin` (on PATH); edit them **here** and deploy with:
+Fast, opinionated, cross-platform `just*` commands in one compiled Rust
+executable. There is no Node, Bun, or PowerShell runtime layer. `just install`
+creates native aliases, so the same binary runs as `justjson`, `justpdf`,
+`justvideo`, and every other command.
 
+## Install
+
+Build from source, then let the binary install itself:
+
+```powershell
+cargo build --locked --release -p justtools
+.\target\release\just.exe install
 ```
-bun run update
+
+```sh
+cargo build --locked --release -p justtools
+./target/release/just install
 ```
 
-The script copies every file in `tools/` to `C:\cmd\bin` byte-for-byte and
-reports updated/unchanged per file. If a bin copy was edited in place (differs
-and is newer than the repo copy) it is skipped with a warning so the edit is
-not lost; salvage it into `tools/` or re-run with `bun run update --force`.
+The default destination is `C:\cmd\bin` when that directory already exists on
+Windows, otherwise the per-user application directory on Windows and
+`~/.local/bin` on macOS/Linux. Override it with `--bin-dir` or
+`JUSTTOOLS_BIN`. Existing managed JustTools files are moved to a timestamped
+recovery directory before the staged native install commits. A failed upgrade
+rolls the prior installation back.
 
-## The tools
+If the install directory is not on `PATH`, the `just` browser offers
+**Add To Path**. The direct commands are `just add-to-path` and
+`just install`. Open a new terminal after changing `PATH`.
 
-| Tool | What it does |
+## Commands and defaults
+
+| Command | Opinionated default |
 | --- | --- |
-| `just` | interactive selector menu for the tools below (Node) |
-| `justpng` | lossy-optimize PNGs in place with pngquant, parallel |
-| `justvideo` | web-optimize videos to 720p H.264 MP4 via ffmpeg, parallel |
-| `justwebp` | convert images to lossy WebP via cwebp, parallel |
-| `justzip` | zip a git working tree honoring all .gitignore rules (PowerShell) |
+| `just` | Browse or directly dispatch every command; offer Add To Path when needed |
+| `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; keep the source |
+| `justavif` | AV1 still image, quality 60, speed 6; install only when smaller |
+| `justjson` | Pretty-print in place with two spaces and a final newline |
+| `justmp3` | LAME VBR quality 2, 48 kHz; keep the source |
+| `justpdf` | Show info for one PDF or merge several into `merged.pdf` |
+| `justpng` | pngquant quality 65-90, speed 3; replace only when smaller |
+| `justport` | Show the owner of exact local ports; guarded same-user kill is optional |
+| `justqr` | 1024 px, error-Q, four-module margin, black-on-white `qr.png` |
+| `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 removal to `<name>-nobg.png` |
+| `justsvg` | Conservative multipass SVGOMG-style optimization, precision 3 |
+| `justvideo` | 720p H.264 MP4, CRF 28, medium preset, AAC 128 kb/s |
+| `justwav` | Stereo 16-bit PCM WAV at 48 kHz; keep the source |
+| `justwebp` | Quality 82, method 5 WebP; replace only when smaller |
+| `justzip` | Smallest-compression ZIP from Git's exact tracked/unignored file set |
 
-Each tool ships as an extensionless bash script (Git Bash) plus a `.cmd` shim
-for cmd/PowerShell; `just` is Node (`just.js`), `justzip` is PowerShell
-(`justzip.ps1`). Shims resolve their siblings relative to their own location,
-so everything must deploy to the same folder. `just` discovers tools by
-scanning that folder for `just[a-z0-9]+` files and reads each script's header
-comment as its live help text.
+Run `just`, `just --help`, or `just help qr`. Short dispatch stays quick:
 
-Line endings are load-bearing: `.cmd` files are CRLF, bash scripts are LF.
-`.gitattributes` disables git EOL conversion repo-wide to protect both; keep
-that in mind if you add files.
+```sh
+just qr "https://example.com"
+just json package.json
+just pdf report-a.pdf report-b.pdf
+just mp3 interview.mov
+just port 4321
+just rmbg portrait.jpg
+```
 
-Adding a tool: drop the script (+ shim) in `tools/`, run `bun run update`.
-The `just` menu picks it up automatically.
+## Consistent file handling
+
+- File tools accept files, folders, Unicode paths, and `--` before unusual path
+  names. Folder scans are direct unless `--recursive` is selected.
+- Batch tools consistently expose `--output`, `--yes`, `--dry-run`, and
+  `--help`; encoders also expose `--jobs`.
+- Inputs are normalized and deduplicated. Output collisions and input/output
+  overlap are rejected before processing.
+- Outputs are written beside their destination and atomically installed.
+  Existing modes are preserved for in-place document edits.
+- Destructive folder operations ask once. Explicit-file operations remain
+  low-friction, while `--yes` makes automation intentional.
+- Audio tools keep sources unless `--replace` is explicit. WebP and AVIF remove
+  a beside-source original only after a smaller replacement is complete.
+- APNG, animated WebP/AVIF, multi-page TIFF, and AVIF transparency are rejected
+  where a still-image conversion would silently discard content.
+- PDF inputs are never deleted. Page ranges are one-based, such as
+  `1-3,5,last`.
+- ZIP paths, symlinks, output self-inclusion, Git submodules, and ZIP64 files
+  are handled explicitly; unsafe links that escape the archive root fail closed.
+
+`justjson` and `justsvg` treat piped input as document content. `justqr` treats
+piped input as text. Media, PDF, and RMBG commands accept paths; see each
+command's `--help` for its exact batch behavior.
+
+`justsvg` uses OXVG, a Rust-native optimizer modeled on SVGO/SVGOMG. Its
+conservative preset preserves IDs, `viewBox`, titles, descriptions, XML
+namespaces, and accessibility attributes.
+
+## Dependencies: discover, explain, confirm
+
+Pure-Rust JSON, PDF, QR, SVG, and port operations have no external runtime
+dependencies. Other commands resolve dependencies only when invoked:
+
+| Commands | Dependency | Confirmed acquisition |
+| --- | --- | --- |
+| audio, AVIF, MP3, video, WAV | FFmpeg + ffprobe | WinGet, Homebrew, apt, dnf, or pacman |
+| PNG | pngquant | package manager, or checksum-pinned official Windows archive |
+| WebP | `cwebp` | WinGet or the platform WebP package |
+| ZIP | Git | native package manager |
+| RMBG | ONNX Runtime + BRIA model | checksum-pinned official runtime archive, then checksum-pinned S3 model archive |
+
+When something is missing, JustTools prints the exact source and command, then
+asks `[y/N]`. It runs the installer only after a real `y`/`yes` from an
+interactive terminal. Redirected input, CI, and other non-interactive runs
+never install or download anything; they return actionable instructions
+instead. Declining leaves the filesystem unchanged.
+
+Dependency installation cannot be bypassed with `--yes`. That flag applies to
+the requested file operation or JustTools' own managed install, not third-party
+software. Override discovery without enabling installation by setting
+`FFMPEG_BIN`, `FFPROBE_BIN`, `PNGQUANT_BIN`, `CWEBP_BIN`, or `GIT_BIN` to a
+specific executable.
+
+The Fedora `ffmpeg-free` package can omit `libx264`, `libmp3lame`, or
+`libaom-av1`. JustTools warns before installation and verifies the exact encoder
+needed by the current command before touching inputs.
+
+## RMBG runtime and model
+
+`justrmbg` resolves ONNX Runtime before it offers the much larger model
+download. A missing portable CPU runtime is fetched from Microsoft's official
+release assets only after confirmation, with platform, size, and SHA-256 pinned
+for Windows, Linux, and macOS on x64 and ARM64. `ORT_DYLIB_PATH` can point to a
+provider-enabled runtime for DirectML, CUDA, or CoreML.
+
+The BRIA RMBG-2.0 archive is hosted at
+`https://m.justgains.com/tools/rmbg-2.0.zip`, verified by SHA-256, selectively
+extracted, and installed atomically in the per-user cache. Use `--model` or
+`RMBG_MODEL` for an existing ONNX file. Custom mirrors require both
+`RMBG_MODEL_ARCHIVE_SHA256` and `RMBG_MODEL_SHA256` alongside
+`RMBG_MODEL_URL`.
+
+Automatic mode tries the platform GPU providers and falls back to CPU, including
+an inference-time retry if a GPU provider initializes but fails. `--cpu` and
+`--gpu` make that choice explicit.
+
+BRIA publishes the RMBG-2.0 weights for non-commercial use. Commercial use
+requires a separate agreement; review the
+[BRIA model card and license](https://huggingface.co/briaai/RMBG-2.0) before
+using the downloaded weights.
+
+## Development and releases
+
+```sh
+cargo fmt --all -- --check
+cargo check --locked --workspace --all-targets
+cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo build --locked --release -p justtools
+```
+
+The test suite exercises every advertised command through the root binary,
+native alias installation and rollback, non-interactive dependency refusal,
+real JSON/PDF/QR/SVG/port behavior, Git-accurate ZIP creation, media safety, and
+offline RMBG acquisition logic. CI also checks the Rust 1.90 minimum and builds
+native release archives for Windows x64/ARM64, Linux x64/ARM64 on an Ubuntu
+22.04 compatibility baseline, and macOS Intel/Apple Silicon. Unix artifacts are
+tarred so executable permissions survive artifact transport.

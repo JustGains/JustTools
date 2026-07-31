@@ -1,3 +1,8 @@
-# Tools are deployed byte-for-byte: .cmd shims must stay CRLF, bash scripts
-# must stay LF. Disable all EOL conversion so git never rewrites either.
-* -text
+* text=auto
+
+.gitattributes text eol=lf
+*.lock text eol=lf
+*.md   text eol=lf
+*.rs   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
