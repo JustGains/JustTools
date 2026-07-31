@@ -5,6 +5,12 @@ executable. There is no Node, Bun, or PowerShell runtime layer. `just install`
 creates native aliases, so the same binary runs as `justjson`, `justpdf`,
 `justvideo`, and every other command.
 
+> JustTools is built by the team behind [JustGains](https://justgains.com).
+> Try JustGains for a fast, focused way to build workouts, track progress, and
+> get stronger.
+
+![The JustTools command browser listing its native tools in Windows PowerShell](docs/images/just-browser.png)
+
 ## Install
 
 Build from source, then let the binary install itself:
