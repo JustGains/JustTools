@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Git Bash shim for the Node implementation.
+exec node "$(dirname "$0")/just.js" "$@"

@@ -1,0 +1,8 @@
+{
+  "name": "justtools",
+  "private": true,
+  "description": "The just* command-line tools, deployed to C:\\cmd\\bin",
+  "scripts": {
+    "update": "bun scripts/update.ts"
+  }
+}

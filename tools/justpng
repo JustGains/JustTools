@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# justpng — optimize PNG files with pngquant (lossy palette quantization),
+# running encodes in parallel. Files are rewritten in place with the same
+# name; with -o, optimized copies go to that directory and sources are kept.
+# Folder runs print a summary of what will happen and ask to continue; -f/-y
+# skips the prompt (pipe mode and non-interactive runs never prompt).
+# Results that are not smaller than the source, or that cannot meet the
+# quality floor, are skipped and the source is left untouched.
+#
+# usage: justpng [-q min-max] [-s speed] [-j jobs] [-f|-y] [-o dir] [dir ...]
+#   with no dirs: optimizes every PNG in the current folder;
+#   if stdin is a pipe (e.g. `rmbg photo.jpg | justpng`), each stdin line
+#   is treated as one PNG path to optimize instead of sweeping a folder
+#   -q         quality range 0-100 as min-max (default: 65-90); a single
+#              number N means 0-N
+#   -s         pngquant speed, 1 slowest/best to 11 fastest (default: 1)
+#   -j         parallel encodes (default: number of CPU cores)
+#   -f, -y     force: skip the confirmation prompt
+#   -o dir     write optimized copies to dir and keep sources (created if needed)
+#   env overrides: QUALITY=65-90  SPEED=1  JOBS=8
+
+set -uo pipefail
+
+QUALITY=${QUALITY:-65-90}
+SPEED=${SPEED:-1}
+JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+FORCE=0
+OUTDIR=
+inputs=()
+
+usage() {
+  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -q)
+      [ $# -ge 2 ] || { echo "justpng: -q needs a quality value" >&2; exit 2; }
+      QUALITY=$2; shift ;;
+    -s)
+      [ $# -ge 2 ] || { echo "justpng: -s needs a speed value" >&2; exit 2; }
+      SPEED=$2; shift ;;
+    -j)
+      [ $# -ge 2 ] || { echo "justpng: -j needs a job count" >&2; exit 2; }
+      JOBS=$2; shift ;;
+    -f|-y|--yes) FORCE=1 ;;
+    -o)
+      [ $# -ge 2 ] || { echo "justpng: -o needs an output directory" >&2; exit 2; }
+      OUTDIR=$2; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; inputs+=("$@"); break ;;
+    -*) echo "justpng: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) inputs+=("$1") ;;
+  esac
+  shift
+done
+
+command -v pngquant >/dev/null 2>&1 || { echo "justpng: pngquant not found on PATH" >&2; exit 1; }
+
+if [ -n "$OUTDIR" ]; then
+  OUTDIR=$(cygpath -u "$OUTDIR" 2>/dev/null || printf '%s' "$OUTDIR")
+fi
+
+case $QUALITY in
+  ''|*[!0-9-]*|-*|*-|*-*-*) echo "justpng: quality must be N or min-max, each 0-100" >&2; exit 2 ;;
+  *-*) ;;
+  *) QUALITY="0-$QUALITY" ;;
+esac
+case $SPEED in ''|*[!0-9]*|0) echo "justpng: speed must be an integer from 1 to 11" >&2; exit 2 ;; esac
+[ "$SPEED" -le 11 ] || { echo "justpng: speed must be an integer from 1 to 11" >&2; exit 2; }
+case $JOBS in ''|*[!0-9]*|0) echo "justpng: jobs must be a positive integer" >&2; exit 2 ;; esac
+
+human() { numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "${1}B"; }
+size_of() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || echo 0; }
+
+optimize_one() {
+  local in=$1 dir base outdir out tmp before after rc
+  in=$(cygpath -u "$in" 2>/dev/null || printf '%s' "$in")
+  if [ ! -f "$in" ]; then
+    echo "justpng: not found: $in" >&2
+    return 1
+  fi
+
+  dir=$(dirname "$in")
+  base=$(basename "$in")
+  outdir=${OUTDIR:-$dir}
+  mkdir -p "$outdir" || { echo "justpng: cannot create output dir: $outdir" >&2; return 1; }
+  out="$outdir/$base"
+  tmp="$out.$BASHPID.tmp.png"
+  before=$(size_of "$in")
+
+  pngquant --quality "$QUALITY" --speed "$SPEED" --strip --force --output "$tmp" -- "$in"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    after=$(size_of "$tmp")
+    if [ "$after" -ge "$before" ]; then
+      rm -f "$tmp"
+      printf '   %s: %s  ->  %s   kept original (optimized PNG not smaller)\n' \
+        "$base" "$(human "$before")" "$(human "$after")"
+      return 0
+    fi
+    mv -f "$tmp" "$out"
+    printf '   %s: %s  ->  %s   %s\n' "$base" "$(human "$before")" "$(human "$after")" "$out"
+  elif [ "$rc" -eq 99 ]; then
+    rm -f "$tmp"
+    printf '   %s: %s   kept original (cannot meet quality floor %s)\n' \
+      "$base" "$(human "$before")" "$QUALITY"
+    return 0
+  else
+    rm -f "$tmp"
+    echo "justpng: pngquant failed ($rc): $in" >&2
+    return 1
+  fi
+}
+
+# Job pool: pool_run throttles background encodes to $JOBS at a time;
+# pool_drain waits for the stragglers. JOBS=1 stays fully serial.
+ACTIVE=0
+POOL_STATUS=0
+
+pool_run() {
+  if [ "$JOBS" -le 1 ]; then
+    optimize_one "$1" || POOL_STATUS=1
+    return 0
+  fi
+  if [ "$ACTIVE" -ge "$JOBS" ]; then
+    wait -n || POOL_STATUS=1
+    ACTIVE=$((ACTIVE - 1))
+  fi
+  optimize_one "$1" </dev/null &
+  ACTIVE=$((ACTIVE + 1))
+}
+
+pool_drain() {
+  while [ "$ACTIVE" -gt 0 ]; do
+    wait -n || POOL_STATUS=1
+    ACTIVE=$((ACTIVE - 1))
+  done
+  return "$POOL_STATUS"
+}
+
+files=()
+
+collect_dir() {
+  local dir=$1
+  dir=$(cygpath -u "$dir" 2>/dev/null || printf '%s' "$dir")
+  if [ ! -d "$dir" ]; then
+    echo "justpng: not a folder: $dir" >&2
+    return 1
+  fi
+
+  shopt -s nullglob nocaseglob
+  local found=("$dir"/*.png)
+  shopt -u nullglob nocaseglob
+  if [ "${#found[@]}" -eq 0 ]; then
+    echo "justpng: no PNG files found in $dir" >&2
+    return 1
+  fi
+
+  echo "justpng: ${#found[@]} PNG(s) in $dir -> ${OUTDIR:-$dir}/"
+  files+=("${found[@]}")
+}
+
+confirm() {
+  [ "$FORCE" = 1 ] && return 0
+  local what ans
+  if [ -n "$OUTDIR" ]; then
+    what="write optimized copies of ${#files[@]} PNG(s) to $OUTDIR (originals kept; existing files there replaced)"
+  else
+    what="OVERWRITE ${#files[@]} PNG(s) in place with quantized versions (lossy)"
+  fi
+  echo "justpng: about to $what   [quality $QUALITY, speed $SPEED, $JOBS parallel]"
+  if [ -t 0 ]; then
+    read -r -p "Proceed? [y/N] " ans
+  else
+    printf 'Proceed? [y/N] '
+    if ! read -r ans 2>/dev/null </dev/tty; then
+      echo
+      echo "justpng: no terminal to confirm on; re-run with -f (or -y) to skip the prompt" >&2
+      return 1
+    fi
+  fi
+  case $ans in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    *) echo "justpng: cancelled" >&2; return 1 ;;
+  esac
+}
+
+optimize_all() {
+  local f
+  for f in "${files[@]}"; do
+    pool_run "$f"
+  done
+  pool_drain
+}
+
+process_stdin() {
+  # Pipe mode: each stdin line is one PNG path to optimize (e.g. produced by
+  # `rmbg photo.jpg | justpng`). Never sweeps a folder, so files not named
+  # on stdin are left alone. No confirmation prompt in this mode.
+  local line count=0 status=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    [ -z "$line" ] && continue
+    count=$((count + 1))
+    pool_run "$line"
+  done
+  pool_drain || status=1
+  if [ "$count" -eq 0 ]; then
+    echo "justpng: no PNG paths received on stdin (pass a folder, or run without a pipe to sweep the current folder)" >&2
+    return 1
+  fi
+  return $status
+}
+
+status=0
+if [ "${#inputs[@]}" -eq 0 ]; then
+  if [ ! -t 0 ]; then
+    process_stdin || status=1
+  else
+    collect_dir "$PWD" || exit 1
+    confirm || exit 1
+    optimize_all || status=1
+  fi
+else
+  for dir in "${inputs[@]}"; do
+    collect_dir "$dir" || status=1
+  done
+  [ "${#files[@]}" -gt 0 ] || exit 1
+  confirm || exit 1
+  optimize_all || status=1
+fi
+exit $status

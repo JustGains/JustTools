@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# justwebp — optimize images as lossy WebP files, encoding in parallel.
+# Output: same-basename .webp files beside each input, replacing the source
+# when no output directory is supplied. With -o, outputs go to that directory
+# and source images are kept. Existing outputs are replaced after a successful
+# encode. Folder runs print a summary of what will happen and ask to continue;
+# -f/-y skips the prompt (pipe mode and non-interactive runs never prompt).
+# Conversions that would not shrink the file are skipped: no .webp is written
+# and the source image is left untouched.
+#
+# usage: justwebp [-q quality] [-m method] [-j jobs] [-w] [-f|-y] [-o dir] [dir ...]
+#   with no dirs: converts every supported image in the current folder;
+#   if stdin is a pipe (e.g. `rmbg photo.jpg | justwebp`), each stdin line
+#   is treated as one image path to convert instead of sweeping a folder
+#   -q         WebP quality, 0-100 (default: 82)
+#   -m         compression method, 0-6 (default: 6)
+#   -j         parallel encodes (default: number of CPU cores)
+#   -w         also process source WebP files (normally skipped)
+#   -f, -y     force: skip the confirmation prompt
+#   -o dir     write outputs to dir and keep source images (created if needed)
+#   env overrides: QUALITY=82  METHOD=6  JOBS=8
+
+set -uo pipefail
+
+QUALITY=${QUALITY:-82}
+METHOD=${METHOD:-6}
+JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
+INCLUDE_WEBP=0
+FORCE=0
+OUTDIR=
+inputs=()
+
+usage() {
+  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -q)
+      [ $# -ge 2 ] || { echo "justwebp: -q needs a quality value" >&2; exit 2; }
+      QUALITY=$2; shift ;;
+    -m)
+      [ $# -ge 2 ] || { echo "justwebp: -m needs a method value" >&2; exit 2; }
+      METHOD=$2; shift ;;
+    -j)
+      [ $# -ge 2 ] || { echo "justwebp: -j needs a job count" >&2; exit 2; }
+      JOBS=$2; shift ;;
+    -w) INCLUDE_WEBP=1 ;;
+    -f|-y|--yes) FORCE=1 ;;
+    -o)
+      [ $# -ge 2 ] || { echo "justwebp: -o needs an output directory" >&2; exit 2; }
+      OUTDIR=$2; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; inputs+=("$@"); break ;;
+    -*) echo "justwebp: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) inputs+=("$1") ;;
+  esac
+  shift
+done
+
+command -v cwebp >/dev/null 2>&1 || { echo "justwebp: cwebp not found on PATH" >&2; exit 1; }
+
+if [ -n "$OUTDIR" ]; then
+  OUTDIR=$(cygpath -u "$OUTDIR" 2>/dev/null || printf '%s' "$OUTDIR")
+fi
+
+case $QUALITY in ''|*[!0-9.]*) echo "justwebp: quality must be a number from 0 to 100" >&2; exit 2 ;; esac
+case $METHOD in ''|*[!0-9]*) echo "justwebp: method must be an integer from 0 to 6" >&2; exit 2 ;; esac
+case $JOBS in ''|*[!0-9]*|0) echo "justwebp: jobs must be a positive integer" >&2; exit 2 ;; esac
+
+human() { numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "${1}B"; }
+size_of() { stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || echo 0; }
+
+encode_one() {
+  local in=$1 dir base stem outdir out tmp before after same
+  in=$(cygpath -u "$in" 2>/dev/null || printf '%s' "$in")
+  if [ ! -f "$in" ]; then
+    echo "justwebp: not found: $in" >&2
+    return 1
+  fi
+
+  dir=$(dirname "$in")
+  base=$(basename "$in")
+  stem=${base%.*}
+  outdir=${OUTDIR:-$dir}
+  mkdir -p "$outdir" || { echo "justwebp: cannot create output dir: $outdir" >&2; return 1; }
+  out="$outdir/$stem.webp"
+  tmp="$out.$BASHPID.tmp.webp"
+  before=$(size_of "$in")
+
+  if cwebp -quiet -q "$QUALITY" -m "$METHOD" -mt -sharp_yuv -metadata none "$in" -o "$tmp"; then
+    after=$(size_of "$tmp")
+    if [ "$after" -ge "$before" ]; then
+      rm -f "$tmp"
+      printf '   %s: %s  ->  %s   kept original (WebP not smaller)\n' \
+        "$base" "$(human "$before")" "$(human "$after")"
+      return 0
+    fi
+    [ "$in" -ef "$out" ] && same=1 || same=0
+    mv -f "$tmp" "$out"
+    if [ -z "$OUTDIR" ] && [ "$same" = 0 ]; then
+      rm -f "$in"
+    fi
+    after=$(size_of "$out")
+    printf '   %s: %s  ->  %s   %s\n' "$base" "$(human "$before")" "$(human "$after")" "$out"
+  else
+    rm -f "$tmp"
+    echo "justwebp: encode failed: $in" >&2
+    return 1
+  fi
+}
+
+# Job pool: pool_run throttles background encodes to $JOBS at a time;
+# pool_drain waits for the stragglers. JOBS=1 stays fully serial.
+ACTIVE=0
+POOL_STATUS=0
+
+pool_run() {
+  if [ "$JOBS" -le 1 ]; then
+    encode_one "$1" || POOL_STATUS=1
+    return 0
+  fi
+  if [ "$ACTIVE" -ge "$JOBS" ]; then
+    wait -n || POOL_STATUS=1
+    ACTIVE=$((ACTIVE - 1))
+  fi
+  encode_one "$1" </dev/null &
+  ACTIVE=$((ACTIVE + 1))
+}
+
+pool_drain() {
+  while [ "$ACTIVE" -gt 0 ]; do
+    wait -n || POOL_STATUS=1
+    ACTIVE=$((ACTIVE - 1))
+  done
+  return "$POOL_STATUS"
+}
+
+files=()
+
+collect_dir() {
+  local dir=$1
+  dir=$(cygpath -u "$dir" 2>/dev/null || printf '%s' "$dir")
+  if [ ! -d "$dir" ]; then
+    echo "justwebp: not a folder: $dir" >&2
+    return 1
+  fi
+
+  shopt -s nullglob nocaseglob
+  local found=("$dir"/*.jpg "$dir"/*.jpeg "$dir"/*.png "$dir"/*.bmp "$dir"/*.tif "$dir"/*.tiff)
+  if [ "$INCLUDE_WEBP" = 1 ]; then
+    found+=("$dir"/*.webp)
+  fi
+  shopt -u nullglob nocaseglob
+  if [ "${#found[@]}" -eq 0 ]; then
+    echo "justwebp: no supported images found in $dir" >&2
+    return 1
+  fi
+
+  echo "justwebp: ${#found[@]} image(s) in $dir -> ${OUTDIR:-$dir}/"
+  files+=("${found[@]}")
+}
+
+confirm() {
+  [ "$FORCE" = 1 ] && return 0
+  local what ans
+  if [ -n "$OUTDIR" ]; then
+    what="convert ${#files[@]} image(s) to WebP in $OUTDIR (originals kept; existing .webp there replaced)"
+  else
+    what="REPLACE ${#files[@]} image(s) in place with .webp files (originals deleted)"
+  fi
+  echo "justwebp: about to $what   [quality $QUALITY, method $METHOD, $JOBS parallel]"
+  if [ -t 0 ]; then
+    read -r -p "Proceed? [y/N] " ans
+  else
+    printf 'Proceed? [y/N] '
+    if ! read -r ans 2>/dev/null </dev/tty; then
+      echo
+      echo "justwebp: no terminal to confirm on; re-run with -f (or -y) to skip the prompt" >&2
+      return 1
+    fi
+  fi
+  case $ans in
+    [yY]|[yY][eE][sS]) return 0 ;;
+    *) echo "justwebp: cancelled" >&2; return 1 ;;
+  esac
+}
+
+encode_all() {
+  local f
+  for f in "${files[@]}"; do
+    pool_run "$f"
+  done
+  pool_drain
+}
+
+process_stdin() {
+  # Pipe mode: each stdin line is one image path to encode (e.g. produced by
+  # `rmbg photo.jpg | justwebp`). Never sweeps a folder, so files not named
+  # on stdin are left alone. No confirmation prompt in this mode.
+  local line count=0 status=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    [ -z "$line" ] && continue
+    count=$((count + 1))
+    pool_run "$line"
+  done
+  pool_drain || status=1
+  if [ "$count" -eq 0 ]; then
+    echo "justwebp: no image paths received on stdin (pass a folder, or run without a pipe to sweep the current folder)" >&2
+    return 1
+  fi
+  return $status
+}
+
+status=0
+if [ "${#inputs[@]}" -eq 0 ]; then
+  if [ ! -t 0 ]; then
+    process_stdin || status=1
+  else
+    collect_dir "$PWD" || exit 1
+    confirm || exit 1
+    encode_all || status=1
+  fi
+else
+  for dir in "${inputs[@]}"; do
+    collect_dir "$dir" || status=1
+  done
+  [ "${#files[@]}" -gt 0 ] || exit 1
+  confirm || exit 1
+  encode_all || status=1
+fi
+exit $status
