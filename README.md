@@ -3,7 +3,7 @@
 Fast, opinionated, cross-platform `just*` commands in one compiled Rust
 executable. There is no Node, Bun, or PowerShell runtime layer. `just install`
 creates native aliases, so the same binary runs as `justjson`, `justpdf`,
-`justvideo`, and every other command.
+`justvideo`, `justready`, `bunt`, and every other command.
 
 > JustTools is built by the team behind [JustGains](https://justgains.com).
 > Try JustGains for a fast, focused way to build workouts, track progress, and
@@ -13,7 +13,24 @@ creates native aliases, so the same binary runs as `justjson`, `justpdf`,
 
 ## Install
 
-Build from source, then let the binary install itself:
+Install the correct published release archive, verify its SHA-256 checksum, install
+all native aliases, and open JustReady with one command:
+
+```powershell
+irm https://raw.githubusercontent.com/JustGains/JustTools/main/ready.ps1 | iex
+```
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JustGains/JustTools/main/ready.sh | sh
+```
+
+The PowerShell command supports Windows x64/ARM64. The shell command supports
+macOS and Linux on x64/ARM64 and also works with `wget` after the script is
+downloaded. Both bootstraps refuse an archive with a missing/mismatched release
+checksum and verify that the selected release contains JustReady before
+changing an existing installation.
+
+To build from a local clone instead, let the binary install itself:
 
 ```powershell
 cargo build --locked --release -p justtools
@@ -36,6 +53,12 @@ If the install directory is not on `PATH`, the `just` browser offers
 **Add To Path**. The direct commands are `just add-to-path` and
 `just install`. Open a new terminal after changing `PATH`.
 
+Bootstrap overrides are optional: `JUSTTOOLS_VERSION=v2.4.0` pins a release,
+`JUSTTOOLS_BIN` selects the install directory, and `JUSTREADY_NO_RUN=1` installs
+without opening the picker. `JUSTTOOLS_ARCHIVE` points either bootstrap at a
+local release archive, which makes the same install path directly testable from
+this repository.
+
 ## Commands and defaults
 
 | Command | Opinionated default |
@@ -43,7 +66,9 @@ If the install directory is not on `PATH`, the `just` browser offers
 | `just` | Browse or directly dispatch every command; offer Add To Path when needed |
 | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; keep the source |
 | `justavif` | AV1 still image, quality 60, speed 6; install only when smaller |
-| `justcrop` | Trim transparent borders to nonzero-alpha bounds; preserve format and source |
+| `justbunt` / `bunt` | Smart TUI to inspect, persistently protect, and stop Node/Bun/Python processes |
+| `justcommit` | Stream the staged Git index, generate a bounded AI summary/message, and commit |
+| `justcrop` | Trim transparent borders per image or use folder-wide shared bounds for aligned animation frames |
 | `justjpg` | Quality 85 progressive 4:2:0 JPEG, optimized Huffman tables, white alpha background |
 | `justjson` | Pretty-print in place with two spaces and a final newline |
 | `justmp3` | LAME VBR quality 2, 48 kHz; keep the source |
@@ -51,6 +76,7 @@ If the install directory is not on `PATH`, the `just` browser offers
 | `justpng` | pngquant quality 65-90, speed 3; replace only when smaller |
 | `justport` | Show the owner of exact local ports; guarded same-user kill is optional |
 | `justqr` | 1024 px, error-Q, four-module margin, black-on-white `qr.png` |
+| `justready` | OS-aware curated software picker with installed-state detection and dependency planning |
 | `justresize` | Fit still images within 1920x1920, never upscale, preserve format and source |
 | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 removal to `<name>-nobg.png` |
 | `justsvg` | Conservative multipass SVGOMG-style optimization, precision 3 |
@@ -70,8 +96,79 @@ just json package.json
 just pdf report-a.pdf report-b.pdf
 just mp3 interview.mov
 just port 4321
+just ready --list
 just rmbg portrait.jpg
+just bunt
+just commit --dry-run
 ```
+
+`justbunt`, `bunt`, and `just bunt` open the same process manager. Press `e`
+to persistently protect the selected workload and `K` to stop every current
+non-protected target. Its PID-reuse checks, launcher-ancestry protection,
+stable table ordering, smart filtering, and responsive staged shutdown flow are
+described in the [bunt guide](docs/bunt.md).
+
+## JustCommit
+
+`justcommit` and `just commit` turn the staged Git index into a concise summary
+and commit message, then run `git commit`. Set `OPENROUTER_API_KEY` once or pass
+`--api-key`; choose any OpenRouter model with `--model`. The default is
+`google/gemini-2.5-flash-lite:nitro`, selected for its low price, low latency,
+and high throughput on OpenRouter. Use `--dry-run` to print without committing,
+or `--all` to explicitly stage the complete working tree first.
+
+```sh
+git add src tests
+justcommit
+justcommit --dry-run
+justcommit --all
+justcommit --model google/gemini-3.1-flash-lite
+```
+
+Large repositories stay fast because the complete name/status stream is counted
+incrementally while only fixed-size path metadata and at most twelve separately
+capped text patches reach the model. Binary, generated, dependency, credential,
+and likely-secret files never contribute patch contents. JustCommit prefers
+`.cursor/rules/git-commit-structure.mdc`, falls back to `.gitmessage`, and checks
+that the index did not change before committing. See the
+[JustCommit guide](docs/commit.md) for exact bounds, staging behavior, model
+selection, privacy, and `--repair` error handoff.
+
+## JustReady software setup
+
+`justready` and `just ready` open a Ninite-style terminal catalog built for
+Windows, macOS, and Linux. It shows only software supported on the current OS,
+organizes apps into Essentials, AI & Agents, Editors & Terminals, Runtimes &
+Containers, Data & API, Communication, Browsers, Utilities, and Creative, and
+marks the opinionated starter set with `★`.
+
+The recommended set includes GitHub Desktop where supported, GitHub CLI, Git,
+Codex CLI, Claude Code, the Claude desktop app where supported, Zed, .NET SDK
+10, Notion where supported, Telegram, DBeaver, and the Windows-only ShareX,
+Windhawk, and Everything. The wider catalog includes tools such as Bitwarden,
+Tailscale, Ollama, VS Code, Node.js, Python, Bun, Rust, Go, Docker, Postman,
+Bruno, Firefox, Chrome, Brave, 7-Zip, PowerToys, VLC, OBS, GIMP, and Inkscape.
+
+```sh
+justready
+justready --list
+justready --json
+justready --install github,github-cli,git
+justready --install codex,claude-code,zed --dry-run
+justready --recommended --yes
+```
+
+Installed-state discovery runs once in the background, so the picker appears
+immediately and rows never jump while results arrive. Installed apps are
+read-only. Press `r` to select missing recommendations, `/` to search, `Tab` to
+jump sections, and `Enter` to review the complete plan.
+
+JustReady uses WinGet on Windows, Homebrew on macOS, and the native distro
+manager plus Flathub or official installers on Linux. Missing WinGet, Homebrew,
+Flatpak, Flathub, `curl`, or `bash` prerequisites are included in the review plan. The
+TUI restores the terminal before execution, leaving UAC/password prompts and
+native installer progress fully visible. See the [JustReady guide](docs/ready.md)
+for the catalog, dependency model, automation contract, and keys.
 
 ## Consistent file handling
 
@@ -116,9 +213,9 @@ Third-party attribution for the native JPEG encoder ships in
 
 ## Dependencies: discover, explain, confirm
 
-Pure-Rust crop, JPG, JSON, PDF, QR, resize, SVG, and port operations have no
-external runtime dependencies. Other commands resolve dependencies only when
-invoked:
+Pure-Rust bunt, crop, JPG, JSON, PDF, QR, resize, SVG, and port operations have
+no external runtime dependencies. Other commands resolve dependencies only
+when invoked:
 
 | Commands | Dependency | Confirmed acquisition |
 | --- | --- | --- |
@@ -126,6 +223,7 @@ invoked:
 | PNG | pngquant | package manager, or checksum-pinned official Windows archive |
 | WebP | `cwebp` | WinGet or the platform WebP package |
 | ZIP | Git | native package manager |
+| Commit | Git + OpenRouter API key | Git via native package manager; key supplied by the user |
 | RMBG | ONNX Runtime + BRIA model | checksum-pinned official runtime archive, then checksum-pinned S3 model archive |
 
 When something is missing, JustTools prints the exact source and command, then
@@ -134,11 +232,17 @@ interactive terminal. Redirected input, CI, and other non-interactive runs
 never install or download anything; they return actionable instructions
 instead. Declining leaves the filesystem unchanged.
 
-Dependency installation cannot be bypassed with `--yes`. That flag applies to
-the requested file operation or JustTools' own managed install, not third-party
-software. Override discovery without enabling installation by setting
+For file-processing commands, dependency installation cannot be bypassed with
+`--yes`. That flag applies to the requested file operation or JustTools' own
+managed install, not its third-party dependency prompt. Override discovery
+without enabling installation by setting
 `FFMPEG_BIN`, `FFPROBE_BIN`, `PNGQUANT_BIN`, `CWEBP_BIN`, or `GIT_BIN` to a
 specific executable.
+
+`justready` is the intentional exception: installing third-party software is
+its entire purpose. It always prints or renders the full plan first; `--yes`
+confirms that displayed plan for automation. Native UAC, `sudo`, or installer
+prompts can still appear.
 
 The Fedora `ffmpeg-free` package can omit `libx264`, `libmp3lame`, or
 `libaom-av1`. JustTools warns before installation and verifies the exact encoder
@@ -201,15 +305,20 @@ cargo build --locked --release -p justtools
 
 The test suite exercises every advertised command through the root binary,
 native alias installation and rollback, non-interactive dependency refusal,
-real JSON/PDF/QR/SVG/port behavior, Git-accurate ZIP creation, media safety,
-native crop/JPG/resize behavior, and offline RMBG acquisition logic. CI also
+real JSON/PDF/QR/SVG/port behavior, JustReady catalog/planning/TUI states,
+bunt filtering/configuration/TUI states, bounded JustCommit scanning and a real
+Git commit through a local OpenRouter-compatible test server,
+Git-accurate ZIP creation, media safety, native crop/JPG/resize behavior, and
+offline RMBG acquisition logic. CI also
 checks the Rust 1.90 minimum and builds
 native release archives for Windows x64/ARM64, Linux x64/ARM64 on an Ubuntu
 22.04 compatibility baseline, and macOS Intel/Apple Silicon. Unix artifacts are
 tarred so executable permissions survive artifact transport. Workflow actions
 use their current Node 24-based major releases.
 
-Every push and pull request keeps its native archives on the Actions run. A
-version tag matching `Cargo.toml`, such as `v2.2.0`, additionally creates a
-GitHub Release and attaches all six archives. Re-running the release job safely
+Every push and pull request keeps its native archives and SHA-256 sidecars on
+the Actions run. CI exercises `ready.ps1` or `ready.sh` against each packaged
+archive before upload. A version tag matching `Cargo.toml`, such as `v2.4.0`,
+additionally creates a GitHub Release and attaches all six archives and their
+checksums. Re-running the release job safely
 replaces its existing assets.

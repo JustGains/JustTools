@@ -89,24 +89,60 @@ jobs:
         shell: pwsh
         run: |
           $stage = "dist/${{ matrix.artifact }}"
+          $archive = "dist/${{ matrix.artifact }}.zip"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/release/${{ matrix.executable }}", README.md, LICENSE, THIRD_PARTY_LICENSES.md -Destination $stage
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/${{ matrix.artifact }}.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $archive
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath "$archive.sha256" -Encoding ascii
 
       - name: Package Unix artifact with executable mode
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           stage="dist/${{ matrix.artifact }}"
+          archive="dist/${{ matrix.artifact }}.tar.gz"
           mkdir -p "$stage"
           install -m 0755 "target/release/${{ matrix.executable }}" "$stage/just"
           install -m 0644 README.md LICENSE THIRD_PARTY_LICENSES.md "$stage/"
-          tar -czf "dist/${{ matrix.artifact }}.tar.gz" -C "$stage" .
+          tar -czf "$archive" -C "$stage" .
+          if command -v sha256sum >/dev/null 2>&1; then
+            hash="$(sha256sum "$archive" | awk '{ print $1 }')"
+          else
+            hash="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
+          fi
+          printf '%s  %s\n' "$hash" "$(basename "$archive")" > "$archive.sha256"
+
+      - name: Exercise Windows bootstrap against packaged release
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $env:JUSTTOOLS_ARCHIVE = (Resolve-Path "dist/${{ matrix.artifact }}.zip").Path
+          $env:JUSTTOOLS_BIN = Join-Path $env:RUNNER_TEMP "justtools-bootstrap-bin"
+          $env:JUSTREADY_NO_RUN = "1"
+          $env:JUSTTOOLS_NO_PATH = "1"
+          & ./ready.ps1
+          & "$env:JUSTTOOLS_BIN/justready.exe" --help
+          & "$env:JUSTTOOLS_BIN/justcommit.exe" --help
+
+      - name: Exercise Unix bootstrap against packaged release
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          export JUSTTOOLS_ARCHIVE="$PWD/dist/${{ matrix.artifact }}.tar.gz"
+          export JUSTTOOLS_BIN="$RUNNER_TEMP/justtools-bootstrap-bin"
+          export JUSTREADY_NO_RUN=1
+          export JUSTTOOLS_NO_PATH=1
+          sh ./ready.sh
+          "$JUSTTOOLS_BIN/justready" --help
+          "$JUSTTOOLS_BIN/justcommit" --help
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}.${{ matrix.archive }}
+          path: |
+            dist/${{ matrix.artifact }}.${{ matrix.archive }}
+            dist/${{ matrix.artifact }}.${{ matrix.archive }}.sha256
           if-no-files-found: error
 
   release:
@@ -155,6 +191,11 @@ jobs:
               echo "::error::Missing or empty release archive: $archive"
               exit 1
             fi
+            if [[ ! -s "dist/$archive.sha256" ]]; then
+              echo "::error::Missing checksum: $archive.sha256"
+              exit 1
+            fi
+            (cd dist && sha256sum -c "$archive.sha256")
           done
 
       - name: Publish release assets

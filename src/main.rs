@@ -23,10 +23,10 @@ fn invoked_name() -> String {
 fn main() {
     let invoked = invoked_name();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let command = if invoked == "rmbg" {
-        "justrmbg"
-    } else {
-        &invoked
+    let command = match invoked.as_str() {
+        "bunt" => "justbunt",
+        "rmbg" => "justrmbg",
+        _ => invoked.as_str(),
     };
     let result = if command == "just" || command == "justtools" {
         selector::run(args)

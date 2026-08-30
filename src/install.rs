@@ -133,7 +133,7 @@ fn executable_name(base: &str) -> String {
 
 fn command_names() -> Vec<&'static str> {
     let mut names: Vec<_> = COMMANDS.iter().map(|command| command.name).collect();
-    names.extend(["just", "rmbg"]);
+    names.extend(["bunt", "just", "rmbg"]);
     names.sort_unstable();
     names.dedup();
     names
@@ -586,8 +586,10 @@ mod tests {
     #[test]
     fn aliases_cover_every_command() {
         let names = command_names();
+        assert!(names.contains(&"bunt"));
         assert!(names.contains(&"just"));
         assert!(names.contains(&"rmbg"));
+        assert!(names.contains(&"justbunt"));
         assert!(names.contains(&"justrmbg"));
         assert!(names.contains(&"justvideo"));
     }

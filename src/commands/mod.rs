@@ -4,6 +4,8 @@ use crate::error::{ToolError, ToolResult};
 
 pub mod audio;
 pub mod avif;
+pub mod bunt;
+pub mod commit;
 mod core_port;
 pub mod crop;
 mod image_ops;
@@ -14,6 +16,7 @@ pub mod pdf;
 pub mod png;
 pub mod port;
 pub mod qr;
+pub mod ready;
 pub mod resize;
 pub mod rmbg;
 pub mod svg;
@@ -35,6 +38,14 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "justavif",
         description: "convert still images to compact AVIF files",
+    },
+    CommandInfo {
+        name: "justbunt",
+        description: "find, protect, and stop Node, Bun, and Python processes",
+    },
+    CommandInfo {
+        name: "justcommit",
+        description: "summarize staged changes and commit with an AI-written message",
     },
     CommandInfo {
         name: "justcrop",
@@ -67,6 +78,10 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "justqr",
         description: "generate a ready-to-scan QR code",
+    },
+    CommandInfo {
+        name: "justready",
+        description: "install a curated OS-aware set of useful software",
     },
     CommandInfo {
         name: "justresize",
@@ -108,6 +123,8 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> ToolResult {
         "justmp3" => audio::run(audio::Mode::Mp3, args),
         "justwav" => audio::run(audio::Mode::Wav, args),
         "justavif" => avif::run(args),
+        "justbunt" => bunt::run(args),
+        "justcommit" => commit::run(args),
         "justcrop" => crop::run(args),
         "justjpg" => jpg::run(args),
         "justpng" => png::run(args),
@@ -118,6 +135,7 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> ToolResult {
         "justpdf" => pdf::run(args),
         "justport" => port::run(args),
         "justqr" => qr::run(args),
+        "justready" => ready::run(args),
         "justresize" => resize::run(args),
         "justrmbg" => rmbg::run(args),
         "justsvg" => svg::run(args),

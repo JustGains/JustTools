@@ -1,6 +1,6 @@
 ---
 name: justtools
-description: Use the compiled JustTools commands for quick, safe image cropping, JPEG creation, resizing and optimization, media conversion, JSON/PDF/SVG work, QR generation, port inspection, background removal, and Git-aware ZIP archives. Use when a task mentions a just* command or needs one of these local file operations.
+description: Use the compiled JustTools commands for curated software setup, AI-assisted Git commits, process cleanup, quick and safe image work, media conversion, JSON/PDF/SVG operations, QR generation, port inspection, background removal, and Git-aware ZIP archives. Use when a task mentions JustReady, JustCommit, bunt, a just* command, or needs one of these local operations.
 ---
 
 # JustTools
@@ -30,6 +30,13 @@ Some media commands need FFmpeg, pngquant, cwebp, or Git. RMBG may need ONNX
 Runtime and its model. JustTools discovers these only when needed and asks for
 interactive confirmation before installing or downloading them.
 
+`justready` is intentionally a system-software installer. Use it only when the
+user asked to prepare the machine or install apps. Start with `justready --list`
+or an explicit `--dry-run`, show the resolved plan, and do not add `--yes`
+without clear authorization to execute that plan. It may legitimately invoke
+WinGet, Homebrew, a Linux package manager, Flatpak, or a fixed official
+installer and may surface UAC or `sudo` prompts.
+
 - Never pipe `yes`, synthesize terminal input, or otherwise bypass a dependency
   confirmation.
 - `--yes` approves the requested file operation; it does not approve third-party
@@ -47,13 +54,20 @@ interactive confirmation before installing or downloading them.
 - Use `--replace` only with clear authorization; outputs are installed atomically.
 - Keep `justresize`'s no-upscale default unless enlargement is explicitly wanted.
 - Keep `justcrop`'s source-preserving default. Increase `--threshold` only when
-  faint edge alpha is intentionally disposable.
+  faint edge alpha is intentionally disposable. Use `--shared-bounds` for frame
+  folders so every image keeps the same dimensions and relative positioning.
 - Remember that JPEG has no alpha. `justjpg` composites onto white unless an
   explicit `--background` color is supplied.
 - Do not flatten animated PNG/WebP, multi-page TIFF, or animated/multi-image AVIF.
 - Do not kill a port owner without identifying it first. `justport --kill`
   intentionally limits termination to same-user processes and revalidates the
   process identity.
+- In `bunt`, protect workloads that must survive with `e` before using `K`.
+  Bunt revalidates PID, start time, runtime, workload, and exclusions before
+  terminating the captured target set.
+- `justcommit` commits only the staged index unless `--all` is explicit. Prefer
+  `--dry-run` when the user asked only for a proposed message. Never expose or
+  pass an OpenRouter key to a repair agent.
 - Warn that BRIA RMBG-2.0 weights are non-commercial unless separately licensed.
 
 ## Quick defaults
@@ -62,11 +76,20 @@ interactive confirmation before installing or downloading them.
   keep the source, and write `image-resized.jpg`.
 - `justcrop image.png`: trim to nonzero-alpha bounds, preserve format, keep the
   source, and write `image-cropped.png`.
+- `justcrop frames --shared-bounds`: union visible bounds within each folder so
+  animation frames remain aligned.
 - `justjpg image.png`: quality 85 progressive JPEG with optimized Huffman
   tables, keep the source, and write `image-optimized.jpg`.
 - `just video clip.mov`: streaming-ready 720p H.264 MP4.
 - `just audio clip.mov`: AAC-LC M4A at 160 kb/s.
 - `just qr TEXT`: 1024 px error-Q PNG.
+- `bunt`: interactively inspect, protect, filter, and stop Node/Bun/Python
+  processes; `bunt --snapshot` is read-only.
+- `justready`: open the OS-filtered software picker; use `justready --list` for
+  read-only inventory and `--install IDS --dry-run` to review exact commands.
+- `justcommit`: summarize the staged index with bounded model input and create
+  the commit; use `--dry-run` to print only and `--all` only with authorization
+  to stage the complete worktree.
 - `just zip`: archive Git's exact tracked and unignored working-tree files.
 
 Read [references/commands.md](references/commands.md) for the full command map

@@ -1,6 +1,6 @@
 [package]
 name = "justtools"
-version = "2.2.0"
+version = "2.4.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Fast, opinionated, cross-platform just* command-line tools"
@@ -20,6 +20,7 @@ anyhow = "1.0"
 atomic-write-file = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ctrlc = "3.4"
+crossterm = "0.29"
 dialoguer = { version = "0.11", default-features = false }
 directories = "6.0"
 flate2 = "1.1"
@@ -28,12 +29,15 @@ jpeg-encoder = "0.7.1"
 justtools-core = { path = "ports/core-tools" }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-22", "coreml", "cuda", "directml", "load-dynamic", "std"] }
 rayon = "1.10"
+ratatui = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 sha2 = "0.10"
+sysinfo = "=0.37.2"
 tar = "0.4"
 tempfile = "3.20"
 thiserror = "2.0"
+toml = "0.9"
 ureq = "3.3"
 walkdir = "2.5"
 zip = { version = "4.3", default-features = false, features = ["deflate"] }

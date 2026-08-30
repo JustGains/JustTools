@@ -5,7 +5,10 @@
 | Need | Command | Default behavior |
 | --- | --- | --- |
 | Browse or dispatch | `just` | Lists every tool and offers Add To Path only when needed |
-| Crop transparent borders | `justcrop` | Nonzero-alpha bounds, same format, keep source |
+| Prepare a machine | `justready` | OS-filtered curated app picker; installed apps are read-only and dependencies are planned |
+| Manage development processes | `justbunt` / `bunt` | Inspect and persistently protect Node/Bun/Python workloads; guarded termination is optional |
+| Summarize and commit staged changes | `justcommit` | Bounded OpenRouter digest/message, then `git commit`; the full diff is never uploaded |
+| Crop transparent borders | `justcrop` | Per-image or folder-wide shared alpha bounds, same format, keep source |
 | Create optimized JPEG | `justjpg` | Quality 85 progressive 4:2:0, white alpha background, keep source |
 | Resize still images | `justresize` | Fit within 1920x1920, no upscale, same format, keep source |
 | Optimize PNG | `justpng` | pngquant quality 65-90; replace only when smaller |
@@ -25,6 +28,61 @@
 
 Every direct alias also works through short dispatch: `just resize`, `just pdf`,
 `just rmbg`, and so on.
+
+## Software setup examples
+
+```powershell
+irm https://raw.githubusercontent.com/JustGains/JustTools/main/ready.ps1 | iex
+```
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JustGains/JustTools/main/ready.sh | sh
+```
+
+```sh
+justready
+justready --list
+justready --json
+justready --install git,github-cli --dry-run
+justready --install dotnet,claude-app,notion --dry-run
+justready --recommended --dry-run
+```
+
+The catalog is filtered before display for Windows, macOS, or Linux and grouped
+by purpose. Use `--yes` only when the user has approved the displayed software
+plan. JustReady restores the normal terminal before invoking native installers.
+The remote bootstrap chooses and verifies the matching GitHub release archive,
+installs JustTools transactionally, and opens JustReady.
+
+## Process manager examples
+
+```sh
+bunt
+bunt --snapshot
+bunt --config-path
+just bunt
+```
+
+Inside the TUI, `e` toggles a persistent workload exclusion, `/` opens smart
+filtering, `x` stops the selected target, and `K` stops the revalidated snapshot
+of every non-protected target. Launcher ancestry is always safety-protected.
+
+## Commit examples
+
+```sh
+git add src tests
+justcommit
+justcommit --dry-run
+justcommit --all
+justcommit --model google/gemini-3.1-flash-lite
+justcommit --repair
+```
+
+Set `OPENROUTER_API_KEY` or pass `--api-key`. JustCommit reads
+`.cursor/rules/git-commit-structure.mdc` before `.gitmessage`, commits only the
+staged index by default, checks that the index stayed unchanged, and keeps model
+input fixed-size even when hundreds of thousands of paths changed. `--all`
+stages the complete working tree before analysis, including in a dry run.
 
 ## Resize examples
 
@@ -46,6 +104,7 @@ is explicit.
 
 ```sh
 justcrop logo.png
+justcrop frames --shared-bounds --output cropped
 justcrop sprites --recursive --padding 2 --output cropped --dry-run
 justcrop sprites --recursive --padding 2 --output cropped --yes
 justjpg photo.png
