@@ -1,6 +1,7 @@
 ---
 name: justtools
-description: Use the compiled JustTools commands for curated software setup, AI-assisted Git commits, process cleanup, quick and safe image work, media conversion, JSON/PDF/SVG operations, QR generation, port inspection, background removal, and Git-aware ZIP archives. Use when a task mentions JustReady, JustCommit, bunt, a just* command, or needs one of these local operations.
+description: Use JustTools whenever a request names `just`, a `just*` command, JustReady, JustCommit, or bunt, or needs local software setup, AI-assisted Git commits, process cleanup, safe image or media conversion, JSON/PDF/SVG/QR work, port inspection, background removal, or Git-aware ZIP archives. Prefer the matching installed JustTools command over an ad-hoc script.
+compatibility: Requires a local shell and JustTools on PATH. Individual commands may also require Git, OpenRouter, FFmpeg, image codecs, ONNX Runtime, or an RMBG model.
 ---
 
 # JustTools
@@ -9,16 +10,33 @@ Prefer the installed JustTools command that directly matches the requested
 operation. The suite is a single cross-platform Rust executable exposed through
 native `just*` aliases and short dispatch such as `just resize`.
 
+## Agent compatibility
+
+- In Codex, users can invoke this skill explicitly as `$justtools`.
+- In Claude Code, users can invoke this skill explicitly as `/justtools`.
+- Both agents can select it automatically from the frontmatter description.
+
+The operational instructions are deliberately client-neutral. Do not assume a
+Claude-only or Codex-only tool name when a normal shell operation is sufficient.
+
 ## Workflow
 
 1. Check availability with `just --version`. If unavailable and this source
    repository is present, build and install it with
    `cargo build --locked --release -p justtools` followed by
    `just install`. Do not mutate PATH unless the user wants the installation.
-2. Choose the narrowest command from [references/commands.md](references/commands.md).
+2. Choose the narrowest command. Load
+   [references/commands.md](references/commands.md) only when its command map or
+   examples are needed.
 3. Read `<command> --help` before using unfamiliar or destructive options.
 4. For a folder, recursion, replacement, or many files, run `--dry-run` first
-   and inspect the resolved inputs and outputs.
+   and inspect the resolved inputs and outputs when the command supports it. A
+   directory argument does not imply recursion: include `--recursive` whenever
+   nested files are requested. The first batch command must include `--dry-run`;
+   provide the execution command only after that preview has been reviewed.
+   RMBG is the exception: it has no `--dry-run` or `--recursive`; use `--check`
+   for runtime/provider preflight and review its explicit file or directory
+   mappings separately.
 5. Keep source files unless the user explicitly requested replacement. Do not
    add `--replace` merely to reduce file count.
 6. Run the command and verify every expected output exists and is readable.
@@ -45,7 +63,9 @@ installer and may surface UAC or `sudo` prompts.
   a dependency is missing, show the user the exact command/source JustTools
   reports and ask them to run or approve it in an interactive terminal.
 - Explicit `*_BIN`, `RMBG_MODEL`, and `ORT_DYLIB_PATH` overrides are resolve-only;
-  do not replace them without checking the user's environment.
+  do not replace them without checking the user's environment. `ORT_DYLIB_PATH`
+  must be an absolute path to a compatible provider-enabled runtime; PATH-only
+  or bare-DLL lookup is intentionally unsupported.
 
 ## Safety rules
 
@@ -65,9 +85,21 @@ installer and may surface UAC or `sudo` prompts.
 - In `bunt`, protect workloads that must survive with `e` before using `K`.
   Bunt revalidates PID, start time, runtime, workload, and exclusions before
   terminating the captured target set.
-- `justcommit` commits only the staged index unless `--all` is explicit. Prefer
-  `--dry-run` when the user asked only for a proposed message. Never expose or
-  pass an OpenRouter key to a repair agent.
+- `justcommit` runs `git add --all` by default, including during a dry run. Use
+  `--staged` unless the user authorized staging every working-tree change. Use
+  `--push` only when the user authorized pushing. Never expose or pass an
+  OpenRouter key to a repair agent. Whenever recommending `--staged`, explain
+  that it avoids the default full-worktree staging and explicitly warn that
+  even `justcommit --dry-run` stages every working-tree change without it.
+  When the user wants only a proposed message from the existing index, use the
+  canonical safe command `justcommit --staged --dry-run`.
+- For RMBG, use `justrmbg --check` to test runtime resolution, strict provider
+  registration, session creation, and tiny real inference without an image or
+  model download. This provider probe does not prove that the full BRIA graph can
+  run without CPU-supported nodes or that a physical GPU executed it. Auto may
+  disclose CPU-supported nodes or visibly fall back to CPU; `--gpu` and explicit
+  GPU providers are strict and never use CPU. Managed acceleration is Windows
+  x64 DirectML; CUDA/CoreML require a compatible absolute `ORT_DYLIB_PATH`.
 - Warn that BRIA RMBG-2.0 weights are non-commercial unless separately licensed.
 
 ## Quick defaults
@@ -80,6 +112,8 @@ installer and may surface UAC or `sudo` prompts.
   animation frames remain aligned.
 - `justjpg image.png`: quality 85 progressive JPEG with optimized Huffman
   tables, keep the source, and write `image-optimized.jpg`.
+- `justjpg assets --recursive --output assets-jpg --dry-run`: preview recursive
+  JPEG copies in a separate directory while keeping every source file.
 - `just video clip.mov`: streaming-ready 720p H.264 MP4.
 - `just audio clip.mov`: AAC-LC M4A at 160 kb/s.
 - `just qr TEXT`: 1024 px error-Q PNG.
@@ -87,9 +121,14 @@ installer and may surface UAC or `sudo` prompts.
   processes; `bunt --snapshot` is read-only.
 - `justready`: open the OS-filtered software picker; use `justready --list` for
   read-only inventory and `--install IDS --dry-run` to review exact commands.
-- `justcommit`: summarize the staged index with bounded model input and create
-  the commit; use `--dry-run` to print only and `--all` only with authorization
-  to stage the complete worktree.
+- `justcommit`: stage the complete worktree by default, summarize it with
+  bounded model input, and create the commit; use `--staged` to preserve the
+  existing index and `--push` only with authorization.
+- `justrmbg image.jpg`: prefer acceleration, disclose any CPU-supported model
+  nodes or full CPU fallback in Auto, keep the source, and write
+  `image-nobg.png`.
+- `justrmbg --check`: test runtime/provider session creation and tiny inference
+  without resolving or downloading the BRIA model.
 - `just zip`: archive Git's exact tracked and unignored working-tree files.
 
 Read [references/commands.md](references/commands.md) for the full command map

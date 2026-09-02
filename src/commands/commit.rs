@@ -27,22 +27,24 @@ const MAX_PATCH_BYTES: usize = 6 * 1024;
 const PATCH_SAMPLE_TIMEOUT: Duration = Duration::from_millis(750);
 const MAX_GENERATED_MESSAGE_BYTES: usize = 16 * 1024;
 
-const HELP: &str = r#"justcommit — Quickly summarize staged changes and commit them with an AI-written message.
+const HELP: &str = r#"justcommit — Quickly stage, summarize, and commit changes with an AI-written message.
 
 Usage:
   justcommit [options] [directory]
 
-The directory must be inside a Git working tree. JustCommit analyzes only the
-staged index by default, sends a tightly bounded digest to OpenRouter, prints the
+The directory must be inside a Git working tree. JustCommit stages the complete
+working tree by default, sends a tightly bounded digest to OpenRouter, prints the
 summary and proposed message, then runs `git commit`. It never uploads a whole
-large diff. Use --all to stage the working tree first.
+large diff. Use --staged to preserve the existing staged selection instead.
 
 Options:
   -C, --directory PATH       Work in this directory instead of the current one
   -m, --model MODEL          OpenRouter model (default: google/gemini-2.5-flash-lite:nitro)
       --api-key KEY          OpenRouter key (otherwise OPENROUTER_API_KEY)
-  -a, --all                  Run `git add --all` before analysis
-  -n, --dry-run              Generate and print without creating a commit
+  -a, --all                  Run `git add --all` before analysis (default)
+      --staged               Use only the existing staged index
+      --push                 Run `git push` after a successful commit
+  -n, --dry-run              Generate and print without committing or pushing
       --no-patches           Send names/counts only, without bounded patch samples
       --timeout SECONDS      OpenRouter request timeout, 1-300 (default: 45)
       --repair               On failure, send a safe repair brief to Codex or Claude
@@ -56,7 +58,8 @@ Commit instructions:
 
 Examples:
   justcommit
-  justcommit --all
+  justcommit --push
+  justcommit --staged
   justcommit --dry-run --model anthropic/claude-haiku-4.5
   justcommit -C ../project --api-key "$OPENROUTER_API_KEY"
   justcommit --repair"#;
@@ -87,6 +90,7 @@ struct Options {
     model: String,
     api_key: Option<String>,
     stage_all: bool,
+    push: bool,
     dry_run: bool,
     include_patches: bool,
     timeout: Duration,
@@ -133,7 +137,8 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
     let mut directory = None;
     let mut model = DEFAULT_MODEL.to_owned();
     let mut api_key = None;
-    let mut stage_all = false;
+    let mut stage_all = true;
+    let mut push = false;
     let mut dry_run = false;
     let mut include_patches = true;
     let mut timeout = Duration::from_secs(45);
@@ -166,6 +171,8 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
             match option {
                 "-h" | "--help" => help = true,
                 "-a" | "--all" => stage_all = true,
+                "--staged" => stage_all = false,
+                "--push" => push = true,
                 "-n" | "--dry-run" => dry_run = true,
                 "--no-patches" => include_patches = false,
                 "--repair" => repair = true,
@@ -235,6 +242,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
         model,
         api_key,
         stage_all,
+        push,
         dry_run,
         include_patches,
         timeout,
@@ -1226,7 +1234,7 @@ fn index_tree(repository: &Repository) -> ToolResult<String> {
     small_git_output(&repository.git, &repository.root, &["write-tree"])
 }
 
-fn create_commit(repository: &Repository, message: &str) -> ToolResult {
+fn create_commit(repository: &Repository, message: &str) -> ToolResult<String> {
     let mut message_file = tempfile::Builder::new()
         .prefix("justcommit-")
         .suffix(".txt")
@@ -1262,7 +1270,31 @@ fn create_commit(repository: &Repository, message: &str) -> ToolResult {
         &["log", "-1", "--format=%B"],
     )?;
     println!("{TOOL}: committed {commit}\n\nCommit message:\n{committed_message}");
-    Ok(())
+    Ok(commit)
+}
+
+fn push_commit(repository: &Repository, commit: &str) -> ToolResult {
+    eprintln!("{TOOL}: pushing {commit} ...");
+    let (success, detail) = run_captured(
+        Command::new(&repository.git)
+            .current_dir(&repository.root)
+            .arg("push"),
+        true,
+    )?;
+    if success {
+        println!("{TOOL}: pushed {commit}");
+        Ok(())
+    } else {
+        let detail = detail.trim();
+        Err(ToolError::new(
+            TOOL,
+            if detail.is_empty() {
+                format!("commit {commit} was created locally, but git push failed")
+            } else {
+                format!("commit {commit} was created locally, but git push failed\n{detail}")
+            },
+        ))
+    }
 }
 
 fn execute(repository: &Repository, options: &Options, key: &str) -> ToolResult {
@@ -1274,7 +1306,11 @@ fn execute(repository: &Repository, options: &Options, key: &str) -> ToolResult 
     if summary.total == 0 {
         return Err(ToolError::new(
             TOOL,
-            "no staged changes; stage files first or pass --all",
+            if options.stage_all {
+                "no changes to commit"
+            } else {
+                "no staged changes; stage files first or omit --staged"
+            },
         ));
     }
     let tree_before = index_tree(repository)?;
@@ -1295,7 +1331,7 @@ fn execute(repository: &Repository, options: &Options, key: &str) -> ToolResult 
     println!("Summary: {}", generation.summary);
     println!("\nCommit message:\n{}", generation.message);
     if options.dry_run {
-        println!("\n{TOOL}: dry run; no commit created");
+        println!("\n{TOOL}: dry run; no commit created or pushed");
         return Ok(());
     }
     let tree_after = index_tree(repository)?;
@@ -1305,7 +1341,11 @@ fn execute(repository: &Repository, options: &Options, key: &str) -> ToolResult 
             "the staged index changed while the message was generated; rerun to avoid committing with a stale summary",
         ));
     }
-    create_commit(repository, &generation.message)
+    let commit = create_commit(repository, &generation.message)?;
+    if options.push {
+        push_commit(repository, &commit)?;
+    }
+    Ok(())
 }
 
 fn executable_on_path(name: &str) -> bool {
@@ -1334,7 +1374,7 @@ fn repair_brief(root: &Path, failure: &str) -> String {
         r#"JUSTCOMMIT REPAIR BRIEF
 Work in this repository: {}
 
-Diagnose and fix the actionable repository or tooling cause of the failure below. Preserve all unrelated existing changes and the existing staged selection. Never print, request, copy, or modify an OpenRouter key or other credential. If the failure is external (credentials, billing, network, service availability) or simply has no staged changes, explain the exact safe manual action instead of inventing code edits. Make necessary source repairs in the working tree, but do not stage files or create a Git commit; report exactly what the user should review and stage before rerunning. Run focused verification for any edit you make.
+Diagnose and fix the actionable repository or tooling cause of the failure below. Preserve all unrelated existing changes and the existing staged selection. Never print, request, copy, or modify an OpenRouter key or other credential. If the failure is external (credentials, billing, network, service availability) or simply has no changes to commit, explain the exact safe manual action instead of inventing code edits. Make necessary source repairs in the working tree, but do not stage files or create a Git commit; report exactly what the user should review and stage before rerunning. Run focused verification for any edit you make.
 
 Failure:
 {}"#,
@@ -1481,10 +1521,11 @@ mod tests {
     use std::process::Stdio;
 
     #[test]
-    fn options_default_to_fast_model_and_staged_commit() {
+    fn options_default_to_fast_model_and_whole_tree_commit() {
         let options = parse(Vec::new()).unwrap();
         assert_eq!(options.model, DEFAULT_MODEL);
-        assert!(!options.stage_all);
+        assert!(options.stage_all);
+        assert!(!options.push);
         assert!(!options.dry_run);
         assert!(options.include_patches);
         assert_eq!(options.timeout, Duration::from_secs(45));
@@ -1497,7 +1538,8 @@ mod tests {
                 "--model=test/model",
                 "--api-key",
                 "private-test-key",
-                "--all",
+                "--staged",
+                "--push",
                 "--dry-run",
                 "--no-patches",
                 "--timeout=9",
@@ -1513,12 +1555,25 @@ mod tests {
         assert_eq!(options.model, "test/model");
         assert_eq!(options.api_key.as_deref(), Some("private-test-key"));
         assert_eq!(options.directory, PathBuf::from("repo"));
-        assert!(options.stage_all);
+        assert!(!options.stage_all);
+        assert!(options.push);
         assert!(options.dry_run);
         assert!(!options.include_patches);
         assert!(options.repair);
         assert_eq!(options.repair_agent, RepairAgent::Claude);
         assert_eq!(options.timeout, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn all_remains_an_explicit_compatibility_alias() {
+        let options = parse(
+            ["--staged", "--all"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap();
+        assert!(options.stage_all);
     }
 
     #[test]

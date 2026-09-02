@@ -1,9 +1,10 @@
 # JustCommit
 
-JustCommit is a one-shot staged-commit helper. It verifies the requested working
-directory, resolves the Git repository root, requires an OpenRouter key, builds
-a bounded digest of the staged index, asks a fast inexpensive model for a
-summary and commit message, and creates the commit without opening an editor.
+JustCommit is a one-shot commit helper. It verifies the requested working
+directory, resolves the Git repository root, stages the complete working tree,
+requires an OpenRouter key, builds a bounded digest of the resulting index, asks
+a fast inexpensive model for a summary and commit message, and creates the
+commit without opening an editor.
 
 ## Quick start
 
@@ -11,13 +12,11 @@ Set the key in the environment so it does not need to appear in shell history:
 
 ```powershell
 $env:OPENROUTER_API_KEY = "your-key"
-git add src tests
 justcommit
 ```
 
 ```sh
 export OPENROUTER_API_KEY="your-key"
-git add src tests
 justcommit
 ```
 
@@ -28,17 +27,23 @@ Useful modes:
 
 ```sh
 justcommit --dry-run
-justcommit --all
+justcommit --push
+justcommit --staged
 justcommit -C ../another-repository
 justcommit --model google/gemini-3.1-flash-lite
 justcommit --no-patches
 ```
 
-By default, only already-staged changes are analyzed and committed. With no
-staged changes, the command stops and suggests either staging files or passing
-`--all`. `--all` runs `git add --all` before analysis, including during a dry
-run; this is explicit because it mutates the index. `--dry-run` prevents only
-the final commit.
+By default, JustCommit runs `git add --all` before analysis. `--all` remains an
+accepted compatibility flag, while `--staged` preserves and uses only the
+existing staged selection. Default dry runs also stage the complete working
+tree; use `justcommit --staged --dry-run` when the index must remain unchanged.
+`--dry-run` prevents both the commit and push.
+
+With `--push`, JustCommit runs a plain `git push` only after the commit succeeds.
+It uses the repository's normal remote, branch, and upstream configuration. If
+the push fails, the error identifies the commit that remains safely available
+locally.
 
 ## Fast by construction
 

@@ -36,22 +36,33 @@ pub fn prepare(inputs: &[PathBuf], output: Option<&Path>) -> ToolResult<JobSet> 
         }
     }
 
-    let batch_mode = inputs.iter().any(|path| path.is_dir());
-    let jobs: Vec<Job> = if batch_mode {
-        if inputs.len() != 1 {
-            return Err(ToolError::usage(
-                TOOL,
-                "directory input must be the only input",
-            ));
-        }
-        let output_dir = output
-            .ok_or_else(|| ToolError::usage(TOOL, "directory input requires -o <outputDir>"))?;
-        if output_dir.exists() && !output_dir.is_dir() {
-            return Err(ToolError::new(
-                TOOL,
-                format!("batch output is not a directory: {}", output_dir.display()),
-            ));
-        }
+    let directory_input = inputs.iter().any(|path| path.is_dir());
+    let batch_mode = directory_input || inputs.len() > 1;
+    if directory_input && inputs.len() != 1 {
+        return Err(ToolError::usage(
+            TOOL,
+            "directory input must be the only input",
+        ));
+    }
+    let output_dir = batch_mode.then_some(output).flatten();
+    if directory_input && output_dir.is_none() {
+        return Err(ToolError::usage(
+            TOOL,
+            "directory input requires -o <outputDir>",
+        ));
+    }
+    if let Some(output_dir) = output_dir
+        && output_dir.exists()
+        && !output_dir.is_dir()
+    {
+        return Err(ToolError::new(
+            TOOL,
+            format!("batch output is not a directory: {}", output_dir.display()),
+        ));
+    }
+
+    let jobs: Vec<Job> = if directory_input {
+        let output_dir = output_dir.unwrap();
         let mut files = fs::read_dir(&inputs[0])
             .map_err(|error| ToolError::new(TOOL, error.to_string()))?
             .collect::<Result<Vec<_>, _>>()
@@ -84,11 +95,22 @@ pub fn prepare(inputs: &[PathBuf], output: Option<&Path>) -> ToolResult<JobSet> 
     } else {
         inputs
             .iter()
-            .map(|input| Job {
-                input: input.clone(),
-                output: output
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| default_output(input)),
+            .map(|input| {
+                let output = if let Some(directory) = output_dir {
+                    let stem = input
+                        .file_stem()
+                        .unwrap_or(input.as_os_str())
+                        .to_string_lossy();
+                    directory.join(format!("{stem}-nobg.png"))
+                } else {
+                    output
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| default_output(input))
+                };
+                Job {
+                    input: input.clone(),
+                    output,
+                }
             })
             .collect()
     };
@@ -187,6 +209,46 @@ mod tests {
         let output = directory.path().join("new/output");
         let jobs = prepare(&[directory.path().to_path_buf()], Some(&output)).unwrap();
         assert!(jobs.batch_mode);
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn multiple_files_map_output_as_a_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.jpg");
+        let second = directory.path().join("second.png");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let output = directory.path().join("results");
+
+        let jobs = prepare(&[first.clone(), second.clone()], Some(&output)).unwrap();
+
+        assert!(jobs.batch_mode);
+        assert_eq!(
+            jobs.jobs,
+            [
+                Job {
+                    input: first,
+                    output: output.join("first-nobg.png"),
+                },
+                Job {
+                    input: second,
+                    output: output.join("second-nobg.png"),
+                },
+            ]
+        );
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn missing_input_fails_before_output_mapping() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.jpg");
+        let output = directory.path().join("results");
+
+        let error = prepare(&[missing], Some(&output)).unwrap_err();
+
+        assert!(error.message().contains("input not found"));
         assert!(!output.exists());
     }
 }

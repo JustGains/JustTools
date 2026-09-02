@@ -1,0 +1,4 @@
+interface:
+  display_name: "JustTools"
+  short_description: "Safely run JustTools setup, Git, media, and utility commands"
+  default_prompt: "Use $justtools to choose and safely run the narrowest JustTools command for this task."

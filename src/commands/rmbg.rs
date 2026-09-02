@@ -23,30 +23,71 @@ Usage:
 
 Options:
   -o, --output PATH  Output file for one image, or output directory in batch mode
-      --cpu          Force CPU inference
-      --gpu          Force GPU inference; fail if no GPU provider initializes
+      --provider EP  auto, cpu, directml, cuda, or coreml (default: auto)
+      --cpu          Alias for --provider cpu
+      --gpu          Require the platform-default GPU provider; never use CPU
+      --check        Check runtime and acceleration without downloading the model
       --model PATH   ONNX model path (or set RMBG_MODEL)
   -h, --help         Show this help
 
-Default output is <input>-nobg.png. Automatic mode tries DirectML/CUDA on
-Windows, CUDA on Linux, or CoreML on macOS before falling back to CPU.
+Default output is <input>-nobg.png. Auto mode uses managed DirectML on Windows
+x64 when available and may use CPU for unsupported model nodes; if acceleration
+fails, it visibly falls back to CPU. Linux CUDA and macOS CoreML use a
+provider-enabled runtime supplied through ORT_DYLIB_PATH.
 
-The model and a portable CPU runtime are downloaded only after interactive
-confirmation, verified with pinned SHA-256 hashes, and cached per user.
+The model and managed runtimes are downloaded only after interactive
+confirmation, verified with pinned sizes and SHA-256 hashes, and cached per user.
 Noninteractive runs never download dependencies."#;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Device {
+pub(crate) enum Provider {
     Auto,
     Cpu,
-    Gpu,
+    DirectMl,
+    Cuda,
+    CoreMl,
+}
+
+impl Provider {
+    fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "cpu" => Some(Self::Cpu),
+            "directml" | "dml" => Some(Self::DirectMl),
+            "cuda" => Some(Self::Cuda),
+            "coreml" => Some(Self::CoreMl),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Cpu => "CPU",
+            Self::DirectMl => "DirectML",
+            Self::Cuda => "CUDA",
+            Self::CoreMl => "CoreML",
+        }
+    }
+
+    fn platform_gpu() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::DirectMl
+        } else if cfg!(target_os = "macos") {
+            Self::CoreMl
+        } else {
+            Self::Cuda
+        }
+    }
 }
 
 #[derive(Debug)]
 struct Options {
     inputs: Vec<PathBuf>,
     output: Option<PathBuf>,
-    device: Device,
+    provider: Provider,
+    provider_explicit: bool,
+    check: bool,
     model: Option<PathBuf>,
     help: bool,
 }
@@ -69,22 +110,50 @@ fn option_path(
         .ok_or_else(|| ToolError::usage(TOOL, format!("{option} needs a value")))
 }
 
-fn set_device(current: &mut Device, requested: Device) -> ToolResult {
-    if *current != Device::Auto && *current != requested {
+fn set_provider(options: &mut Options, requested: Provider, option: &str) -> ToolResult {
+    if options.provider_explicit && options.provider != requested {
         return Err(ToolError::usage(
             TOOL,
-            "--cpu and --gpu cannot be used together",
+            format!(
+                "conflicting provider options: {} and {option}",
+                options.provider.name()
+            ),
         ));
     }
-    *current = requested;
+    options.provider = requested;
+    options.provider_explicit = true;
     Ok(())
+}
+
+fn provider_value(
+    args: &[OsString],
+    index: &mut usize,
+    option: &str,
+    inline: Option<&str>,
+) -> ToolResult<Provider> {
+    let value = if let Some(value) = inline {
+        value
+    } else {
+        *index += 1;
+        args.get(*index)
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| ToolError::usage(TOOL, format!("{option} needs a value")))?
+    };
+    Provider::parse(value).ok_or_else(|| {
+        ToolError::usage(
+            TOOL,
+            format!("unknown provider '{value}'; expected auto, cpu, directml, cuda, or coreml"),
+        )
+    })
 }
 
 fn parse(args: Vec<OsString>) -> ToolResult<Options> {
     let mut options = Options {
         inputs: Vec::new(),
         output: None,
-        device: Device::Auto,
+        provider: Provider::Auto,
+        provider_explicit: false,
+        check: false,
         model: None,
         help: false,
     };
@@ -117,8 +186,13 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
                 "--model" => {
                     options.model = Some(option_path(&args, &mut index, option, inline)?);
                 }
-                "--cpu" => set_device(&mut options.device, Device::Cpu)?,
-                "--gpu" => set_device(&mut options.device, Device::Gpu)?,
+                "--provider" => {
+                    let provider = provider_value(&args, &mut index, option, inline)?;
+                    set_provider(&mut options, provider, option)?;
+                }
+                "--cpu" => set_provider(&mut options, Provider::Cpu, option)?,
+                "--gpu" => set_provider(&mut options, Provider::platform_gpu(), option)?,
+                "--check" => options.check = true,
                 _ if text.is_some_and(|value| value.starts_with('-')) => {
                     return Err(ToolError::usage(
                         TOOL,
@@ -133,16 +207,22 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
         index += 1;
     }
 
-    if !options.help && options.inputs.is_empty() {
+    if !options.help && !options.check && options.inputs.is_empty() {
         return Err(ToolError::usage(
             TOOL,
-            "at least one image or folder is required",
+            "at least one image or folder is required (or use --check)",
         ));
     }
-    if options.output.is_some() && options.inputs.len() > 1 {
+    if options.check && !options.inputs.is_empty() {
         return Err(ToolError::usage(
             TOOL,
-            "-o/--output can only be used with a single input image",
+            "--check does not accept image inputs",
+        ));
+    }
+    if options.check && (options.output.is_some() || options.model.is_some()) {
+        return Err(ToolError::usage(
+            TOOL,
+            "--check cannot be combined with --output or --model",
         ));
     }
     Ok(options)
@@ -155,24 +235,37 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         return Ok(());
     }
 
+    if options.check {
+        let runtime = runtime::initialize(options.provider)?;
+        status(&format!(
+            "Runtime: {} ({})",
+            runtime.path.display(),
+            runtime.source
+        ));
+        return runtime::check(options.provider, &runtime);
+    }
+
+    // Validate all cheap file mappings before offering any dependency download.
     let job_set = jobs::prepare(&options.inputs, options.output.as_deref())?;
     // Resolve the small native runtime before offering the ~780 MiB model download.
-    runtime::initialize()?;
+    let runtime = runtime::initialize(options.provider)?;
+    status(&format!(
+        "Runtime: {} ({})",
+        runtime.path.display(),
+        runtime.source
+    ));
     let model_path = model::resolve(options.model.as_deref())?;
     jobs::reject_model_overwrite(&job_set.jobs, &model_path)?;
 
     let load_started = Instant::now();
-    let mut engine = Engine::create(&model_path, options.device)?;
-    let detected = match options.device {
-        Device::Auto if engine.is_gpu() => {
-            format!("GPU detected ({})", engine.provider().to_ascii_uppercase())
-        }
-        Device::Auto => "no GPU detected — using CPU".to_owned(),
-        _ => engine.provider().to_ascii_uppercase(),
-    };
+    let (mut engine, attempts) = Engine::create(&model_path, options.provider, &runtime)?;
+    for attempt in attempts {
+        eprintln!("{TOOL}: {attempt}");
+    }
     status(&format!(
-        "Model loaded in {:.1}s — {detected}",
-        load_started.elapsed().as_secs_f64()
+        "Model loaded in {:.1}s — selected provider: {}",
+        load_started.elapsed().as_secs_f64(),
+        engine.provider().name()
     ));
 
     let piped = !io::stdout().is_terminal();
@@ -182,7 +275,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         if let Err(error) = process_job(
             &mut engine,
             &model_path,
-            options.device,
+            options.provider,
             &job.input,
             &job.output,
         ) {
@@ -206,10 +299,16 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         }
     }
 
-    if failures == job_set.jobs.len() {
+    let succeeded = job_set.jobs.len() - failures;
+    if job_set.batch_mode {
+        status(&format!(
+            "Completed: {succeeded} succeeded, {failures} failed"
+        ));
+    }
+    if failures > 0 {
         return Err(ToolError::new(
             TOOL,
-            format!("all {failures} input file(s) failed"),
+            format!("batch incomplete: {succeeded} succeeded, {failures} failed"),
         ));
     }
     Ok(())
@@ -218,7 +317,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
 fn process_job(
     engine: &mut Engine,
     model_path: &Path,
-    device: Device,
+    provider: Provider,
     input: &Path,
     output: &Path,
 ) -> ToolResult {
@@ -226,13 +325,14 @@ fn process_job(
     let prepared = PreparedImage::load(input)?;
     let mask = match engine.infer(&prepared.chw) {
         Ok(mask) => mask,
-        Err(gpu_error) if device == Device::Auto && engine.is_gpu() => {
+        Err(gpu_error) if provider == Provider::Auto && engine.is_gpu() => {
             eprintln!(
-                "{TOOL}: GPU ({}) inference failed — falling back to CPU.\n{}",
-                engine.provider().to_ascii_uppercase(),
+                "{TOOL}: {} inference failed — falling back to CPU.\n{}",
+                engine.provider().name(),
                 gpu_error.message()
             );
-            *engine = Engine::cpu(model_path)?;
+            engine.replace_with_cpu(model_path)?;
+            status("Provider changed to CPU for this and remaining images");
             engine.infer(&prepared.chw)?
         }
         Err(error) => return Err(error),
@@ -253,16 +353,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_original_contract() {
+    fn parses_gpu_alias_as_strict_platform_provider() {
         let options = parse(vec!["photo.jpg".into(), "--gpu".into()]).unwrap();
         assert_eq!(options.inputs, [PathBuf::from("photo.jpg")]);
-        assert_eq!(options.device, Device::Gpu);
+        assert_eq!(options.provider, Provider::platform_gpu());
     }
 
     #[test]
-    fn rejects_conflicting_devices() {
+    fn parses_all_named_providers() {
+        for (value, expected) in [
+            ("auto", Provider::Auto),
+            ("cpu", Provider::Cpu),
+            ("directml", Provider::DirectMl),
+            ("cuda", Provider::Cuda),
+            ("coreml", Provider::CoreMl),
+        ] {
+            let options =
+                parse(vec!["photo.jpg".into(), "--provider".into(), value.into()]).unwrap();
+            assert_eq!(options.provider, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_conflicting_providers() {
         let error = parse(vec!["x.png".into(), "--cpu".into(), "--gpu".into()]).unwrap_err();
         assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn check_needs_no_input() {
+        let options = parse(vec!["--check".into()]).unwrap();
+        assert!(options.check);
+        assert!(options.inputs.is_empty());
+    }
+
+    #[test]
+    fn check_rejects_image_arguments() {
+        let error = parse(vec!["--check".into(), "x.png".into()]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn invalid_provider_is_usage_error() {
+        let error = parse(vec!["x.png".into(), "--provider".into(), "vulkan".into()]).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.message().contains("unknown provider"));
     }
 
     #[test]

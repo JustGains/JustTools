@@ -8,6 +8,17 @@ on:
       - "v*"
   pull_request:
   workflow_dispatch:
+    inputs:
+      directml_smoke:
+        description: Run the Windows hosted DirectML execution-provider smoke test
+        required: false
+        default: false
+        type: boolean
+      physical_gpu:
+        description: Run a strict DirectML provider check on a self-hosted Windows x64 GPU runner (not hardware proof)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -35,31 +46,49 @@ jobs:
             artifact: justtools-windows-x64
             executable: just.exe
             archive: zip
+            ort_archive: onnxruntime-win-x64-1.24.3.zip
+            ort_sha256: 4fbfb85d0e9de9bb6fb8a9866a7cb477cbad404d889b236931bf3f5d547e5f48
+            ort_library: onnxruntime.dll
           - name: Windows ARM64
             os: windows-11-arm
             artifact: justtools-windows-arm64
             executable: just.exe
             archive: zip
+            ort_archive: onnxruntime-win-arm64-1.24.3.zip
+            ort_sha256: 0b9ee92bcd1f82f684b574cb413f27595e0d2f7b96ec6d02b30301f45ad313b0
+            ort_library: onnxruntime.dll
           - name: Linux x64 (glibc 2.35 baseline)
             os: ubuntu-22.04
             artifact: justtools-linux-x64
             executable: just
             archive: tar.gz
+            ort_archive: onnxruntime-linux-x64-1.24.3.tgz
+            ort_sha256: 4c436a280d650f8bf32c921a2bf4de7c42cc32884c51c90e47de991708bbb5a4
+            ort_library: libonnxruntime.so
           - name: Linux ARM64 (glibc 2.35 baseline)
             os: ubuntu-22.04-arm
             artifact: justtools-linux-arm64
             executable: just
             archive: tar.gz
+            ort_archive: onnxruntime-linux-aarch64-1.24.3.tgz
+            ort_sha256: 15100fb88b4c692cdd6bf2cca5f4a26a3806cebca8136de6681e2aba4b2ea033
+            ort_library: libonnxruntime.so
           - name: macOS Apple Silicon
             os: macos-15
             artifact: justtools-macos-arm64
             executable: just
             archive: tar.gz
+            ort_archive: onnxruntime-osx-arm64-1.24.3.tgz
+            ort_sha256: c255663d40755f84b1b86373bdb9870bb65f3a2c3d779b3d7ae31aaa00cebb4f
+            ort_library: libonnxruntime.dylib
           - name: macOS Intel
             os: macos-15-intel
             artifact: justtools-macos-x64
             executable: just
             archive: tar.gz
+            ort_archive: onnxruntime-osx-x86_64-1.22.0.tgz
+            ort_sha256: e4ec94a7696de74fb1b12846569aa94e499958af6ffa186022cfde16c9d617f0
+            ort_library: libonnxruntime.dylib
 
     runs-on: ${{ matrix.os }}
 
@@ -78,11 +107,54 @@ jobs:
       - name: Lint every target
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: Test every target
+      - name: Provision pinned portable CPU runtime
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "${{ matrix.ort_archive }}"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/${{ matrix.ort_archive }}"
+          if ("${{ matrix.ort_archive }}" -like "*1.22.0*") {
+            $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/${{ matrix.ort_archive }}"
+          }
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne "${{ matrix.ort_sha256 }}") {
+            throw "ONNX Runtime archive checksum mismatch: expected ${{ matrix.ort_sha256 }}, got $actual"
+          }
+          $extract = Join-Path $env:RUNNER_TEMP "justtools-test-ort"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          if ("${{ matrix.ort_archive }}" -like "*.zip") {
+            Expand-Archive -LiteralPath $archive -DestinationPath $extract
+          } else {
+            tar -xzf $archive -C $extract
+            if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
+          }
+          $libraries = @(Get-ChildItem -LiteralPath $extract -Recurse -File -Filter "${{ matrix.ort_library }}")
+          if ($libraries.Count -ne 1) {
+            throw "Expected exactly one ${{ matrix.ort_library }}, found $($libraries.Count)"
+          }
+          "JUSTTOOLS_TEST_ORT_DYLIB_PATH=$($libraries[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "JUSTTOOLS_REQUIRE_TEST_ORT=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Test every target with real CPU inference
         run: cargo test --locked --workspace --all-targets
 
       - name: Build release executable
         run: cargo build --locked --release -p justtools
+
+      - name: Check release RMBG CPU inference
+        shell: pwsh
+        run: |
+          $output = & "target/release/${{ matrix.executable }}" rmbg --check --provider cpu 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw $output }
+          foreach ($expected in @(
+            "Requested provider: CPU",
+            "Selected provider: CPU",
+            "Check: OK (session creation and inference succeeded)"
+          )) {
+            if (-not $output.Contains($expected)) {
+              throw "RMBG check output is missing '$expected':`n$output"
+            }
+          }
 
       - name: Package Windows artifact
         if: matrix.archive == 'zip'
@@ -144,6 +216,144 @@ jobs:
             dist/${{ matrix.artifact }}.${{ matrix.archive }}
             dist/${{ matrix.artifact }}.${{ matrix.archive }}.sha256
           if-no-files-found: error
+
+  directml-smoke:
+    name: DirectML execution-provider smoke (hosted, not hardware proof)
+    if: github.event_name == 'workflow_dispatch' && inputs.directml_smoke
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use stable Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - name: Assemble pinned DirectML runtime
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $env:RUNNER_TEMP "justtools-directml-runtime"
+          $packages = Join-Path $env:RUNNER_TEMP "justtools-directml-packages"
+          New-Item -ItemType Directory -Force -Path $runtime, $packages | Out-Null
+          $assets = @(
+            @{
+              Name = "onnxruntime";
+              Url = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.24.3/microsoft.ml.onnxruntime.directml.1.24.3.nupkg";
+              Sha256 = "0d42ecd9a672f8621d238c0edfc243b1087a10fa90d5071399e451311350996b"
+            },
+            @{
+              Name = "directml";
+              Url = "https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.4/microsoft.ai.directml.1.15.4.nupkg";
+              Sha256 = "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9"
+            }
+          )
+          foreach ($asset in $assets) {
+            $package = Join-Path $packages "$($asset.Name).nupkg"
+            $zip = Join-Path $packages "$($asset.Name).zip"
+            $extract = Join-Path $packages $asset.Name
+            Invoke-WebRequest -Uri $asset.Url -OutFile $package
+            $actual = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $asset.Sha256) {
+              throw "$($asset.Name) checksum mismatch: expected $($asset.Sha256), got $actual"
+            }
+            Copy-Item -LiteralPath $package -Destination $zip
+            Expand-Archive -LiteralPath $zip -DestinationPath $extract
+          }
+          $members = @(
+            @{
+              Source = "onnxruntime/runtimes/win-x64/native/onnxruntime_providers_shared.dll";
+              Destination = "onnxruntime_providers_shared.dll";
+              Bytes = 22040;
+              Sha256 = "6a95b8e65633a00e90e9c6e7f2b034708b82a58de79357e4e81bf0a06ed21145"
+            },
+            @{
+              Source = "directml/bin/x64-win/DirectML.dll";
+              Destination = "DirectML.dll";
+              Bytes = 18527776;
+              Sha256 = "9c9e6d822561c6c41b90e6994b3e8857cf1d66dbfb1e0c4c799c7c89b4e92da1"
+            },
+            @{
+              Source = "onnxruntime/LICENSE";
+              Destination = "notices/onnxruntime-LICENSE.txt";
+              Bytes = 1094;
+              Sha256 = "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+            },
+            @{
+              Source = "onnxruntime/ThirdPartyNotices.txt";
+              Destination = "notices/onnxruntime-ThirdPartyNotices.txt";
+              Bytes = 331175;
+              Sha256 = "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866"
+            },
+            @{
+              Source = "directml/LICENSE.txt";
+              Destination = "notices/directml-LICENSE.txt";
+              Bytes = 10439;
+              Sha256 = "a05138e3a085ff60a44881eedfa58dccb03ecc1d7b1f6ae888418e8c2fec4b8d"
+            },
+            @{
+              Source = "directml/ThirdPartyNotices.txt";
+              Destination = "notices/directml-ThirdPartyNotices.txt";
+              Bytes = 4577;
+              Sha256 = "2c95795c13ff48a58b6ed916f37901c23d964b5d9d601af422f17ad2172e7950"
+            },
+            @{
+              Source = "onnxruntime/runtimes/win-x64/native/onnxruntime.dll";
+              Destination = "onnxruntime.dll";
+              Bytes = 17328672;
+              Sha256 = "8fba9fd33466c722a077731d46947d009ae20756b18977bb13158a29dd93d80a"
+            }
+          )
+          foreach ($member in $members) {
+            $source = Join-Path $packages $member.Source
+            $metadata = Get-Item -LiteralPath $source
+            $actual = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($metadata.Length -ne $member.Bytes -or $actual -ne $member.Sha256) {
+              throw "DirectML member verification failed for $($member.Source)"
+            }
+            $destination = Join-Path $runtime $member.Destination
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+            Copy-Item -LiteralPath $source -Destination $destination
+          }
+          "ORT_DYLIB_PATH=$(Join-Path $runtime 'onnxruntime.dll')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run strict DirectML provider inference
+        shell: pwsh
+        run: |
+          $output = cargo run --locked --release -p justtools -- rmbg --check --provider directml 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw $output }
+          foreach ($expected in @(
+            "Requested provider: DirectML",
+            "Selected provider: DirectML",
+            "Check: OK (session creation and inference succeeded)"
+          )) {
+            if (-not $output.Contains($expected)) {
+              throw "Strict DirectML check output is missing '$expected':`n$output"
+            }
+          }
+
+  physical-gpu:
+    name: DirectML provider check (self-hosted GPU runner, not hardware proof)
+    if: github.event_name == 'workflow_dispatch' && inputs.physical_gpu
+    runs-on: [self-hosted, Windows, X64, gpu, directml]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check strict DirectML on the configured provider runtime
+        shell: pwsh
+        run: |
+          if (-not [IO.Path]::IsPathFullyQualified($env:ORT_DYLIB_PATH)) {
+            throw "The self-hosted runner must provide an absolute ORT_DYLIB_PATH"
+          }
+          $output = cargo run --locked --release -p justtools -- rmbg --check --provider directml 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw $output }
+          foreach ($expected in @(
+            "Requested provider: DirectML",
+            "Selected provider: DirectML",
+            "Check: OK (session creation and inference succeeded)"
+          )) {
+            if (-not $output.Contains($expected)) {
+              throw "Strict DirectML GPU check output is missing '$expected':`n$output"
+            }
+          }
 
   release:
     name: Publish GitHub release

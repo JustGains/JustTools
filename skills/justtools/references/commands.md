@@ -7,7 +7,7 @@
 | Browse or dispatch | `just` | Lists every tool and offers Add To Path only when needed |
 | Prepare a machine | `justready` | OS-filtered curated app picker; installed apps are read-only and dependencies are planned |
 | Manage development processes | `justbunt` / `bunt` | Inspect and persistently protect Node/Bun/Python workloads; guarded termination is optional |
-| Summarize and commit staged changes | `justcommit` | Bounded OpenRouter digest/message, then `git commit`; the full diff is never uploaded |
+| Stage, summarize, and commit changes | `justcommit` | Bounded OpenRouter digest/message, then `git commit` and optional `git push`; the full diff is never uploaded |
 | Crop transparent borders | `justcrop` | Per-image or folder-wide shared alpha bounds, same format, keep source |
 | Create optimized JPEG | `justjpg` | Quality 85 progressive 4:2:0, white alpha background, keep source |
 | Resize still images | `justresize` | Fit within 1920x1920, no upscale, same format, keep source |
@@ -23,7 +23,7 @@
 | Optimize SVG | `justsvg` | Conservative SVGOMG-style OXVG optimization |
 | Generate QR | `justqr` | 1024 px PNG, error correction Q, four-module margin |
 | Inspect ports | `justport` | Show listener/process ownership; guarded kill is optional |
-| Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to transparent PNG |
+| Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to `<name>-nobg.png`; Auto visibly falls back to CPU |
 | Archive a repository | `justzip` | ZIP Git's tracked and unignored file set |
 
 Every direct alias also works through short dispatch: `just resize`, `just pdf`,
@@ -70,19 +70,19 @@ of every non-protected target. Launcher ancestry is always safety-protected.
 ## Commit examples
 
 ```sh
-git add src tests
 justcommit
 justcommit --dry-run
-justcommit --all
+justcommit --push
+justcommit --staged
 justcommit --model google/gemini-3.1-flash-lite
 justcommit --repair
 ```
 
 Set `OPENROUTER_API_KEY` or pass `--api-key`. JustCommit reads
-`.cursor/rules/git-commit-structure.mdc` before `.gitmessage`, commits only the
-staged index by default, checks that the index stayed unchanged, and keeps model
-input fixed-size even when hundreds of thousands of paths changed. `--all`
-stages the complete working tree before analysis, including in a dry run.
+`.cursor/rules/git-commit-structure.mdc` before `.gitmessage`, stages the complete
+working tree by default, checks that the index stayed unchanged, and keeps model
+input fixed-size even when hundreds of thousands of paths changed. `--staged`
+uses only the existing index. `--push` pushes only after the commit succeeds.
 
 ## Resize examples
 
@@ -116,6 +116,38 @@ Crop includes every nonzero-alpha pixel unless `--threshold` is raised. JPG
 composites transparency onto white, uses progressive output, and strips
 metadata by default. Both commands keep source files unless `--replace` is
 explicit.
+
+## Background removal examples
+
+```sh
+justrmbg portrait.jpg
+justrmbg --check
+justrmbg --check --gpu
+justrmbg portrait.jpg --provider cpu
+```
+
+The default `auto` provider prefers acceleration. It reports when CPU supports
+model nodes the accelerator cannot execute, and visibly reports any full move to
+CPU. `--cpu` is strict CPU. `--gpu` is the strict platform GPU (DirectML on
+Windows, CoreML on macOS, and CUDA elsewhere), while `--provider` also accepts
+`auto`, `cpu`, `directml`, `cuda`, and `coreml`. Explicit GPU modes never fall
+back to CPU.
+
+`--check` creates a provider session and runs tiny real inference without an
+image and without resolving or downloading the BRIA model. It proves provider
+operation, not strict compatibility of the full BRIA graph or physical-GPU use.
+Windows x64 can use
+the verified managed DirectML bundle. CUDA and CoreML require an absolute
+`ORT_DYLIB_PATH` naming a compatible provider-enabled runtime; relative and
+PATH-only DLL lookup is rejected. A non-interactive run never downloads a
+missing runtime. Normal inference may offer verified runtime/model acquisition
+only after interactive consent. BRIA RMBG-2.0 weights are non-commercial unless
+separately licensed.
+
+Multiple explicit images form a batch and a supplied `--output` is then a
+directory. RMBG continues after per-file failures, reports totals, and exits
+nonzero if any file failed. It has no `--dry-run` or `--recursive`; use
+`--check` as runtime preflight and review explicit file/directory mappings.
 
 ## Common batch pattern
 

@@ -1,0 +1,50 @@
+{
+  "skill_name": "justtools",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I want JustCommit to propose a message for only the changes I already staged. Do not run commands, stage anything else, commit, or push. Give me the exact command and explain the important default it avoids.",
+      "expected_output": "Recommend `justcommit --staged --dry-run` and explain that JustCommit stages the complete working tree by default, even in dry-run mode.",
+      "files": [],
+      "expectations": [
+        "The response gives `justcommit --staged --dry-run` as the command.",
+        "The response explains that the default stages the complete working tree, including during a dry run.",
+        "The response does not suggest `--push`, committing, or running a staging command."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I have transparent PNG files under assets and want recursive JPEG copies without changing the originals. Do not run anything. Give me a safe first JustTools command and call out what happens to transparency.",
+      "expected_output": "Recommend a recursive `justjpg` command with a separate output directory and `--dry-run`, and explain that JPEG has no alpha so JustTools composites transparency onto white.",
+      "files": [],
+      "expectations": [
+        "The response selects `justjpg` with `assets`, `--recursive`, `--output`, and `--dry-run`.",
+        "The response preserves the source files and does not use `--replace`.",
+        "The response explains that JPEG has no alpha and transparent pixels use the default white composite."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Port 4321 is occupied, but do not kill anything yet. Which JustTools command should I run first, and what must be checked before any later termination? Do not run commands.",
+      "expected_output": "Recommend `justport 4321` first, identify the listener and owner, and only use guarded kill after authorization and process-identity revalidation.",
+      "files": [],
+      "expectations": [
+        "The response recommends `justport 4321` or the equivalent `just port 4321` inspection command.",
+        "The response does not recommend killing anything immediately.",
+        "The response requires checking ownership or process identity before a later guarded kill."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I want to check whether RMBG acceleration works without processing an image or downloading the model. Do not run anything. Give me the safe command and explain Auto versus strict GPU behavior.",
+      "expected_output": "Recommend `justrmbg --check` or `just rmbg --check`, explain that it creates a real session and runs tiny inference without resolving the BRIA model, and distinguish Auto's disclosed CPU-supported nodes or full CPU fallback from strict `--gpu` behavior.",
+      "files": [],
+      "expectations": [
+        "The response gives `justrmbg --check` or `just rmbg --check` as the command.",
+        "The response explains that check mode performs real tiny inference without an image or RMBG model download.",
+        "The response explains that Auto discloses CPU-supported model nodes while acceleration remains selected, and visibly reports a complete CPU fallback.",
+        "The response explains that `--gpu` is strict and never executes model nodes on CPU or falls back to CPU."
+      ]
+    }
+  ]
+}

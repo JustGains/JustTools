@@ -195,9 +195,19 @@ fn bunt_snapshot_runs_through_short_dispatch() {
 }
 
 #[test]
-fn justcommit_uses_repository_rules_model_override_and_creates_commit() {
+fn justcommit_stages_by_default_uses_rules_and_pushes_the_created_commit() {
     let directory = tempfile::tempdir().unwrap();
     let repository = directory.path();
+    let remote_directory = tempfile::tempdir().unwrap();
+    let remote = remote_directory.path().join("origin.git");
+    assert!(
+        git(
+            remote_directory.path(),
+            &["init", "--bare", "--quiet", "origin.git"]
+        )
+        .status
+        .success()
+    );
     assert!(git(repository, &["init", "--quiet"]).status.success());
     assert!(
         git(repository, &["config", "user.name", "JustCommit Test"])
@@ -208,6 +218,29 @@ fn justcommit_uses_repository_rules_model_override_and_creates_commit() {
         git(
             repository,
             &["config", "user.email", "justcommit@example.invalid"]
+        )
+        .status
+        .success()
+    );
+    fs::write(repository.join("README.md"), "# Test repository\n").unwrap();
+    assert!(git(repository, &["add", "README.md"]).status.success());
+    assert!(
+        git(repository, &["commit", "--quiet", "-m", "Initial commit"])
+            .status
+            .success()
+    );
+    assert!(
+        git(
+            repository,
+            &["remote", "add", "origin", remote.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(
+            repository,
+            &["push", "--quiet", "--set-upstream", "origin", "HEAD"]
         )
         .status
         .success()
@@ -224,7 +257,6 @@ fn justcommit_uses_repository_rules_model_override_and_creates_commit() {
         "Use type(scope): subject and explain user impact.",
     )
     .unwrap();
-    assert!(git(repository, &["add", "--all"]).status.success());
 
     let generated = serde_json::json!({
         "summary": "Add a reusable greeting helper",
@@ -240,6 +272,7 @@ fn justcommit_uses_repository_rules_model_override_and_creates_commit() {
             "integration-test-key",
             "--model",
             "test/fast-model",
+            "--push",
         ])
         .env("JUSTCOMMIT_OPENROUTER_URL", url)
         .output()
@@ -259,6 +292,7 @@ fn justcommit_uses_repository_rules_model_override_and_creates_commit() {
     assert!(success.contains(
         "Commit message:\nfeat(core): add greeting helper\n\nExpose a small reusable greeting for callers."
     ));
+    assert!(stdout.contains("justcommit: pushed"));
 
     let request = server.join().unwrap();
     assert!(
@@ -280,6 +314,20 @@ fn justcommit_uses_repository_rules_model_override_and_creates_commit() {
         log.trim(),
         "feat(core): add greeting helper\n\nExpose a small reusable greeting for callers."
     );
+    let remote_log = git(
+        remote_directory.path(),
+        &[
+            "--git-dir",
+            "origin.git",
+            "log",
+            "--all",
+            "-1",
+            "--pretty=%B",
+        ],
+    );
+    assert!(remote_log.status.success());
+    let remote_log = String::from_utf8_lossy(&remote_log.stdout).replace("\r\n", "\n");
+    assert_eq!(remote_log.trim(), log.trim());
 }
 
 #[test]
@@ -339,6 +387,135 @@ fn justcommit_live_openrouter_dry_run_exercises_the_complete_digest_flow() {
             .status
             .success()
     );
+}
+
+fn test_ort_runtime() -> Option<PathBuf> {
+    let runtime = std::env::var_os("JUSTTOOLS_TEST_ORT_DYLIB_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    assert!(
+        runtime.is_some() || std::env::var_os("JUSTTOOLS_REQUIRE_TEST_ORT").is_none(),
+        "JUSTTOOLS_REQUIRE_TEST_ORT is set, but JUSTTOOLS_TEST_ORT_DYLIB_PATH is missing"
+    );
+    runtime
+}
+
+#[test]
+fn rmbg_cpu_check_runs_tiny_inference_without_model_resolution() {
+    let Some(runtime) = test_ort_runtime() else {
+        eprintln!("skipping RMBG runtime check; JUSTTOOLS_TEST_ORT_DYLIB_PATH is not set");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let missing_model = directory.path().join("must-not-be-resolved.onnx");
+    let result = Command::new(binary())
+        .args(["rmbg", "--check", "--provider", "cpu"])
+        .env("ORT_DYLIB_PATH", runtime)
+        .env("RMBG_MODEL", &missing_model)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "CPU check failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("Requested provider: CPU"), "{stdout}");
+    assert!(stdout.contains("Selected provider: CPU"), "{stdout}");
+    assert!(
+        stdout.contains("session creation and inference succeeded"),
+        "{stdout}"
+    );
+    assert!(!missing_model.exists());
+}
+
+#[test]
+fn rmbg_auto_discloses_gpu_failure_before_cpu_fallback() {
+    let Some(runtime) = test_ort_runtime() else {
+        eprintln!("skipping RMBG runtime check; JUSTTOOLS_TEST_ORT_DYLIB_PATH is not set");
+        return;
+    };
+    let result = Command::new(binary())
+        .args(["rmbg", "--check"])
+        .env("ORT_DYLIB_PATH", runtime)
+        .env(
+            "RMBG_GPU_PROVIDERS",
+            if cfg!(target_os = "macos") {
+                "coreml"
+            } else {
+                "cuda"
+            },
+        )
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "Auto check failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stdout.contains("Selected provider: CPU (Auto fallback)"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("CUDA unavailable:") || stderr.contains("CoreML unavailable:"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn rmbg_strict_gpu_does_not_fall_back_with_cpu_runtime() {
+    let Some(runtime) = test_ort_runtime() else {
+        eprintln!("skipping RMBG runtime check; JUSTTOOLS_TEST_ORT_DYLIB_PATH is not set");
+        return;
+    };
+    let provider = if cfg!(target_os = "macos") {
+        "coreml"
+    } else {
+        "cuda"
+    };
+    let result = Command::new(binary())
+        .args(["rmbg", "--check", "--provider", provider])
+        .env("ORT_DYLIB_PATH", runtime)
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!stdout.contains("Selected provider: CPU"), "{stdout}");
+    assert!(stderr.contains("check failed"), "{stderr}");
+}
+
+#[test]
+fn rmbg_rejects_missing_input_before_runtime_resolution() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.png");
+    let result = Command::new(binary())
+        .arg("rmbg")
+        .arg(&missing)
+        .env_remove("ORT_DYLIB_PATH")
+        .output()
+        .unwrap();
+
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("input not found"), "{stderr}");
+    assert!(!stderr.contains("Refusing to download"), "{stderr}");
+}
+
+#[test]
+fn rmbg_rejects_relative_runtime_override() {
+    let result = Command::new(binary())
+        .args(["rmbg", "--check", "--provider", "cpu"])
+        .env("ORT_DYLIB_PATH", "onnxruntime.dll")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("must be an absolute path"), "{stderr}");
 }
 
 #[test]

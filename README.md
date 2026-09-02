@@ -67,7 +67,7 @@ this repository.
 | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; keep the source |
 | `justavif` | AV1 still image, quality 60, speed 6; install only when smaller |
 | `justbunt` / `bunt` | Smart TUI to inspect, persistently protect, and stop Node/Bun/Python processes |
-| `justcommit` | Stream the staged Git index, generate a bounded AI summary/message, and commit |
+| `justcommit` | Stage the worktree, generate a bounded AI summary/message, commit, and optionally push |
 | `justcrop` | Trim transparent borders per image or use folder-wide shared bounds for aligned animation frames |
 | `justjpg` | Quality 85 progressive 4:2:0 JPEG, optimized Huffman tables, white alpha background |
 | `justjson` | Pretty-print in place with two spaces and a final newline |
@@ -78,7 +78,7 @@ this repository.
 | `justqr` | 1024 px, error-Q, four-module margin, black-on-white `qr.png` |
 | `justready` | OS-aware curated software picker with installed-state detection and dependency planning |
 | `justresize` | Fit still images within 1920x1920, never upscale, preserve format and source |
-| `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 removal to `<name>-nobg.png` |
+| `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 removal to `<name>-nobg.png`; Auto provider selection |
 | `justsvg` | Conservative multipass SVGOMG-style optimization, precision 3 |
 | `justvideo` | 720p H.264 MP4, CRF 28, medium preset, AAC 128 kb/s |
 | `justwav` | Stereo 16-bit PCM WAV at 48 kHz; keep the source |
@@ -98,6 +98,7 @@ just mp3 interview.mov
 just port 4321
 just ready --list
 just rmbg portrait.jpg
+just rmbg --check
 just bunt
 just commit --dry-run
 ```
@@ -110,18 +111,19 @@ described in the [bunt guide](docs/bunt.md).
 
 ## JustCommit
 
-`justcommit` and `just commit` turn the staged Git index into a concise summary
-and commit message, then run `git commit`. Set `OPENROUTER_API_KEY` once or pass
+`justcommit` and `just commit` stage the complete working tree by default, turn
+the resulting Git index into a concise summary and commit message, then run
+`git commit`. Set `OPENROUTER_API_KEY` once or pass
 `--api-key`; choose any OpenRouter model with `--model`. The default is
 `google/gemini-2.5-flash-lite:nitro`, selected for its low price, low latency,
-and high throughput on OpenRouter. Use `--dry-run` to print without committing,
-or `--all` to explicitly stage the complete working tree first.
+and high throughput on OpenRouter. Use `--dry-run` to stop before committing or
+pushing, or `--staged` to preserve an existing staged selection.
 
 ```sh
-git add src tests
 justcommit
 justcommit --dry-run
-justcommit --all
+justcommit --push
+justcommit --staged
 justcommit --model google/gemini-3.1-flash-lite
 ```
 
@@ -130,7 +132,9 @@ incrementally while only fixed-size path metadata and at most twelve separately
 capped text patches reach the model. Binary, generated, dependency, credential,
 and likely-secret files never contribute patch contents. JustCommit prefers
 `.cursor/rules/git-commit-structure.mdc`, falls back to `.gitmessage`, and checks
-that the index did not change before committing. See the
+that the index did not change before committing. `--staged` preserves an
+existing staged selection; `--push` runs the repository's normal `git push`
+after a successful commit. See the
 [JustCommit guide](docs/commit.md) for exact bounds, staging behavior, model
 selection, privacy, and `--repair` error handoff.
 
@@ -224,7 +228,7 @@ when invoked:
 | WebP | `cwebp` | WinGet or the platform WebP package |
 | ZIP | Git | native package manager |
 | Commit | Git + OpenRouter API key | Git via native package manager; key supplied by the user |
-| RMBG | ONNX Runtime + BRIA model | checksum-pinned official runtime archive, then checksum-pinned S3 model archive |
+| RMBG | ONNX Runtime + BRIA model | checksum-pinned official Microsoft runtime packages, then the checksum-pinned `m.justgains.com` model archive |
 
 When something is missing, JustTools prints the exact source and command, then
 asks `[y/N]`. It runs the installer only after a real `y`/`yes` from an
@@ -250,22 +254,55 @@ needed by the current command before touching inputs.
 
 ## RMBG runtime and model
 
-`justrmbg` resolves ONNX Runtime before it offers the much larger model
-download. A missing portable CPU runtime is fetched from Microsoft's official
-release assets only after confirmation, with platform, size, and SHA-256 pinned
-for Windows, Linux, and macOS on x64 and ARM64. `ORT_DYLIB_PATH` can point to a
-provider-enabled runtime for DirectML, CUDA, or CoreML.
+The easy path is `justrmbg image.jpg`. Before processing anything, run
+`justrmbg --check`: it resolves the native runtime, creates an ONNX session, and
+runs a tiny real inference without requiring an image or resolving or downloading
+the large BRIA model. Its output identifies the requested and selected providers,
+the canonical runtime path and source, failed provider attempts, and any fallback.
+Provider registration and this probe confirm execution-provider operation, not
+which physical GPU adapter performed the work or whether the full BRIA graph is
+compatible with strict provider-only execution.
 
-The BRIA RMBG-2.0 archive is hosted at
+Provider selection is explicit when needed:
+
+```sh
+justrmbg image.jpg                         # Auto; acceleration preferred, CPU use disclosed
+justrmbg --check --gpu                    # strict platform GPU; never CPU
+justrmbg image.jpg --provider cpu         # strict CPU
+justrmbg image.jpg --provider directml    # strict DirectML
+justrmbg image.jpg --provider cuda        # strict CUDA
+justrmbg image.jpg --provider coreml      # strict CoreML
+```
+
+`--provider` accepts `auto`, `cpu`, `directml`, `cuda`, or `coreml`. `--cpu` is
+an alias for strict CPU. `--gpu` is strict DirectML on Windows, CoreML on macOS,
+and CUDA elsewhere. Explicit GPU requests never silently execute nodes on CPU.
+Auto may use CPU for model nodes an accelerator cannot execute, or fall back
+entirely to CPU; it reports either case and updates the selected provider after
+a full fallback.
+
+On Windows x64, Auto can install a managed DirectML runtime assembled from
+checksum-pinned official Microsoft ONNX Runtime DirectML and DirectML packages.
+The complete flavor-specific cache—including companion DLLs, licenses, notices,
+and its manifest—is verified before reuse. A partial or corrupt cache is repaired
+only through the normal confirmed download path. Other platforms use the managed
+portable CPU runtime by default. CUDA and CoreML remain advanced bring-your-own
+options: set `ORT_DYLIB_PATH` to the **absolute path** of a compatible,
+provider-enabled ONNX Runtime library and supply its matching native dependencies.
+Relative paths and Windows PATH-only/bare-DLL discovery are intentionally rejected
+to prevent loading an unintended runtime such as a private System32 copy.
+
+Runtime acquisition is offered only in an interactive terminal and is verified by
+exact byte size and SHA-256 before atomic installation. A non-interactive process
+never downloads a missing dependency. `ORT_DYLIB_PATH` is authoritative and
+resolve-only; JustTools does not replace the runtime it names.
+
+After the runtime is ready, the BRIA RMBG-2.0 archive is fetched from
 `https://m.justgains.com/tools/rmbg-2.0.zip`, verified by SHA-256, selectively
 extracted, and installed atomically in the per-user cache. Use `--model` or
 `RMBG_MODEL` for an existing ONNX file. Custom mirrors require both
 `RMBG_MODEL_ARCHIVE_SHA256` and `RMBG_MODEL_SHA256` alongside
 `RMBG_MODEL_URL`.
-
-Automatic mode tries the platform GPU providers and falls back to CPU, including
-an inference-time retry if a GPU provider initializes but fails. `--cpu` and
-`--gpu` make that choice explicit.
 
 BRIA publishes the RMBG-2.0 weights for non-commercial use. Commercial use
 requires a separate agreement; review the
@@ -292,6 +329,10 @@ npx skills add JustGains/JustTools --skill justtools --agent codex --global
 Use `npx skills add . --skill justtools` from a local clone while developing the
 skill. Set `DISABLE_TELEMETRY=1` if you do not want the installer's anonymous
 usage telemetry.
+
+After installation, invoke the skill explicitly with `$justtools` in Codex or
+`/justtools` in Claude Code. Both agents may also select it automatically when a
+request names JustTools or clearly matches one of its operations.
 
 ## Development and releases
 

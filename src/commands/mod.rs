@@ -45,7 +45,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "justcommit",
-        description: "summarize staged changes and commit with an AI-written message",
+        description: "stage, summarize, commit, and optionally push with an AI-written message",
     },
     CommandInfo {
         name: "justcrop",
