@@ -583,10 +583,8 @@ fn pdf_number(object: &Object) -> Option<f64> {
 fn pdf_string(object: &Object) -> Option<String> {
     let bytes = object.as_str().ok()?;
     if bytes.starts_with(&[0xfe, 0xff]) && bytes.len() % 2 == 0 {
-        let utf16: Vec<_> = bytes[2..]
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-            .collect();
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let utf16: Vec<_> = pairs.iter().map(|pair| u16::from_be_bytes(*pair)).collect();
         String::from_utf16(&utf16).ok()
     } else {
         Some(String::from_utf8_lossy(bytes).into_owned())
