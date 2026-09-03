@@ -82,6 +82,10 @@ installer and may surface UAC or `sudo` prompts.
 - Do not kill a port owner without identifying it first. `justport --kill`
   intentionally limits termination to same-user processes and revalidates the
   process identity.
+- `justports` discovery is read-only until the user explicitly opens, starts,
+  or stops a selection. Review remembered start recipes before launching them.
+  `K` must remain confirmation-gated and revalidate PID, start time, same-user
+  ownership, and exact listener ownership before stopping the selected service.
 - In `bunt`, protect workloads that must survive with `e` before using `K`.
   Bunt revalidates PID, start time, runtime, workload, and exclusions before
   terminating the captured target set.
@@ -119,6 +123,11 @@ installer and may surface UAC or `sudo` prompts.
 - `just qr TEXT`: 1024 px error-Q PNG.
 - `bunt`: interactively inspect, protect, filter, and stop Node/Bun/Python
   processes; `bunt --snapshot` is read-only.
+- `justports`: live smart view of development servers with project metadata,
+  browser launch, automatic server saving, and a lower Launch Again area;
+  `justports --snapshot` is the read-only automation view and `--json --all`
+  inventories every listener. `K` safely stops only the confirmed Running Now
+  selection.
 - `justready`: open the OS-filtered software picker; use `justready --list` for
   read-only inventory and `--install IDS --dry-run` to review exact commands.
 - `justcommit`: stage the complete worktree by default, summarize it with

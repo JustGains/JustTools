@@ -15,6 +15,7 @@ mod media;
 pub mod pdf;
 pub mod png;
 pub mod port;
+pub mod ports;
 pub mod qr;
 pub mod ready;
 pub mod resize;
@@ -76,6 +77,10 @@ pub const COMMANDS: &[CommandInfo] = &[
         description: "find what is using a local port",
     },
     CommandInfo {
+        name: "justports",
+        description: "discover development servers and open them in your browser",
+    },
+    CommandInfo {
         name: "justqr",
         description: "generate a ready-to-scan QR code",
     },
@@ -134,6 +139,7 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> ToolResult {
         "justjson" => json::run(args),
         "justpdf" => pdf::run(args),
         "justport" => port::run(args),
+        "justports" => ports::run(args),
         "justqr" => qr::run(args),
         "justready" => ready::run(args),
         "justresize" => resize::run(args),

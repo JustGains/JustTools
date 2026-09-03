@@ -1646,6 +1646,7 @@ dependencies = [
  "image",
  "jpeg-encoder",
  "justtools-core",
+ "netstat2",
  "ort",
  "predicates",
  "ratatui",

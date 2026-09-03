@@ -75,6 +75,7 @@ this repository.
 | `justpdf` | Show info for one PDF or merge several into `merged.pdf` |
 | `justpng` | pngquant quality 65-90, speed 3; replace only when smaller |
 | `justport` | Show the owner of exact local ports; guarded same-user kill is optional |
+| `justports` | Live TUI with Running Now, automatic server saving, and one-key Launch Again |
 | `justqr` | 1024 px, error-Q, four-module margin, black-on-white `qr.png` |
 | `justready` | OS-aware curated software picker with installed-state detection and dependency planning |
 | `justresize` | Fit still images within 1920x1920, never upscale, preserve format and source |
@@ -96,6 +97,8 @@ just json package.json
 just pdf report-a.pdf report-b.pdf
 just mp3 interview.mov
 just port 4321
+just ports
+just ports --snapshot
 just ready --list
 just rmbg portrait.jpg
 just rmbg --check
@@ -108,6 +111,43 @@ to persistently protect the selected workload and `K` to stop every current
 non-protected target. Its PID-reuse checks, launcher-ancestry protection,
 stable table ordering, smart filtering, and responsive staged shutdown flow are
 described in the [bunt guide](docs/bunt.md).
+
+## JustPorts development server browser
+
+`justports` and `just ports` continuously discover local TCP listeners, join
+them to their owning processes, and walk upward from each process working
+directory to find project metadata. Package, Cargo, Python, Go, .NET, Ruby, and
+PHP markers supply project names; known commands and dependencies identify
+stacks such as Vite, Next.js, Astro, Expo/Metro, Uvicorn, Django, Rails, and
+.NET. The default view keeps likely development servers prominent, while `a`
+reveals every listener.
+
+The upper panel contains servers running now. Press `Enter` or `o` to open the
+selected URL in the default browser, `p` to open its project folder, `/` to
+filter, `K` to safely stop the selected service after confirmation, and `r` to
+refresh immediately. Every detected development server is
+saved automatically—there is no manual snapshot step. When a saved server is no
+longer running, it appears in the lower **Launch Again** area. Press `Tab` to
+focus it and `Enter` or `s` to start the selected project from its original
+directory using a detected package script (`dev`, `start`, `serve`, or `web`),
+a common project command, or a safe prior invocation.
+
+```sh
+justports
+justports --all
+justports --snapshot
+justports --json --all
+justports --open 5173
+justports --history-path
+```
+
+Discovery itself is read-only. JustPorts only stops a service after the user
+presses `K` and confirms; it revalidates
+PID, process start time, same-user ownership, and exact port ownership first.
+History is stored atomically in the per-user JustTools
+data directory, bounded to 40 entries, and omits suspicious commands containing
+credentials or opaque tokens. See the [JustPorts guide](docs/ports.md) for the
+full detection, history, and automation contract.
 
 ## JustCommit
 

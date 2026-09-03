@@ -23,6 +23,7 @@
 | Optimize SVG | `justsvg` | Conservative SVGOMG-style OXVG optimization |
 | Generate QR | `justqr` | 1024 px PNG, error correction Q, four-module margin |
 | Inspect ports | `justport` | Show listener/process ownership; guarded kill is optional |
+| Browse development servers | `justports` | Live smart TUI, automatic saving, and one-key Launch Again recipes |
 | Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to `<name>-nobg.png`; Auto visibly falls back to CPU |
 | Archive a repository | `justzip` | ZIP Git's tracked and unignored file set |
 
@@ -66,6 +67,26 @@ just bunt
 Inside the TUI, `e` toggles a persistent workload exclusion, `/` opens smart
 filtering, `x` stops the selected target, and `K` stops the revalidated snapshot
 of every non-protected target. Launcher ancestry is always safety-protected.
+
+## Development server browser examples
+
+```sh
+justports
+justports --all
+justports --snapshot
+justports --json --all
+justports --open 5173
+justports --history-path
+just ports
+```
+
+Running Now joins TCP listeners to project metadata and opens the selected URL
+or project folder. Every detected dev server is saved automatically. When it
+stops, Launch Again offers the explicitly selected safe package/common/prior
+recipe from its original directory. Commands containing likely credentials or
+opaque tokens are not cached. Use `justport` instead when exact-port ownership
+from scripts is the goal; `K` provides confirmation-gated termination for the
+selected Running Now service.
 
 ## Commit examples
 

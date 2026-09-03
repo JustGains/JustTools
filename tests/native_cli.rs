@@ -17,6 +17,7 @@ const COMMANDS: &[&str] = &[
     "justpdf",
     "justpng",
     "justport",
+    "justports",
     "justqr",
     "justready",
     "justresize",
@@ -192,6 +193,45 @@ fn bunt_snapshot_runs_through_short_dispatch() {
     assert!(stdout.contains("STATE"));
     assert!(stdout.contains("RUNTIME"));
     assert!(stdout.contains("WORKLOAD"));
+}
+
+#[test]
+fn justports_snapshot_and_json_run_through_short_dispatch() {
+    let directory = tempfile::tempdir().unwrap();
+    let history = directory.path().join("ports-history.json");
+    let snapshot = Command::new(binary())
+        .args(["ports", "--snapshot", "--all"])
+        .env("JUSTPORTS_HISTORY", &history)
+        .output()
+        .unwrap();
+    assert!(
+        snapshot.status.success(),
+        "JustPorts snapshot failed: {}",
+        String::from_utf8_lossy(&snapshot.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&snapshot.stdout);
+    assert!(
+        stdout.contains("TCP listeners") || (stdout.contains("PORT") && stdout.contains("URL")),
+        "{stdout}"
+    );
+
+    let json = Command::new(binary())
+        .args(["ports", "--json", "--all"])
+        .env("JUSTPORTS_HISTORY", &history)
+        .output()
+        .unwrap();
+    assert!(
+        json.status.success(),
+        "JustPorts JSON failed: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(value.is_array());
+    if let Some(server) = value.as_array().and_then(|servers| servers.first()) {
+        assert!(server["port"].is_number());
+        assert!(server["url"].is_string());
+        assert!(server["projectName"].is_string());
+    }
 }
 
 #[test]

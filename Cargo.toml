@@ -27,6 +27,7 @@ flate2 = "1.1"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "qoi", "tiff", "webp"] }
 jpeg-encoder = "0.7.1"
 justtools-core = { path = "ports/core-tools" }
+netstat2 = "0.11.2"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-22", "coreml", "cuda", "directml", "load-dynamic", "std"] }
 rayon = "1.10"
 ratatui = "0.30"
