@@ -487,7 +487,7 @@ fn rmbg_cpu_check_runs_tiny_inference_without_model_resolution() {
 }
 
 #[test]
-fn rmbg_auto_discloses_gpu_failure_before_cpu_fallback() {
+fn rmbg_auto_uses_gpu_or_discloses_failure_before_cpu_fallback() {
     let Some(runtime) = test_ort_runtime() else {
         eprintln!("skipping RMBG runtime check; JUSTTOOLS_TEST_ORT_DYLIB_PATH is not set");
         return;
@@ -512,18 +512,24 @@ fn rmbg_auto_discloses_gpu_failure_before_cpu_fallback() {
     );
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(
-        stdout.contains("Selected provider: CPU (Auto fallback)"),
-        "{stdout}"
-    );
-    assert!(
-        stderr.contains("CUDA unavailable:") || stderr.contains("CoreML unavailable:"),
-        "{stderr}"
-    );
+    assert!(stdout.contains("Requested provider: Auto"), "{stdout}");
+    if stdout.contains("Selected provider: CPU (Auto fallback)") {
+        assert!(
+            stderr.contains("CUDA unavailable:") || stderr.contains("CoreML unavailable:"),
+            "{stderr}"
+        );
+    } else {
+        let selected_gpu = if cfg!(target_os = "macos") {
+            "Selected provider: CoreML"
+        } else {
+            "Selected provider: CUDA"
+        };
+        assert!(stdout.contains(selected_gpu), "{stdout}");
+    }
 }
 
 #[test]
-fn rmbg_strict_gpu_does_not_fall_back_with_cpu_runtime() {
+fn rmbg_strict_gpu_never_falls_back() {
     let Some(runtime) = test_ort_runtime() else {
         eprintln!("skipping RMBG runtime check; JUSTTOOLS_TEST_ORT_DYLIB_PATH is not set");
         return;
@@ -539,11 +545,24 @@ fn rmbg_strict_gpu_does_not_fall_back_with_cpu_runtime() {
         .output()
         .unwrap();
 
-    assert_eq!(result.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(!stdout.contains("Selected provider: CPU"), "{stdout}");
-    assert!(stderr.contains("check failed"), "{stderr}");
+    if result.status.success() {
+        let selected_gpu = if cfg!(target_os = "macos") {
+            "Selected provider: CoreML"
+        } else {
+            "Selected provider: CUDA"
+        };
+        assert!(stdout.contains(selected_gpu), "{stdout}");
+        assert!(
+            stdout.contains("session creation and inference succeeded"),
+            "{stdout}"
+        );
+    } else {
+        assert_eq!(result.status.code(), Some(1));
+        assert!(stderr.contains("check failed"), "{stderr}");
+    }
 }
 
 #[test]
