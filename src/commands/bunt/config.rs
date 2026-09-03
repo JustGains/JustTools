@@ -264,15 +264,19 @@ pub fn config_path() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    fn project_path() -> &'static str {
+        if cfg!(windows) {
+            "f:/project"
+        } else {
+            "/srv/project"
+        }
+    }
+
     fn identity() -> WorkloadIdentity {
         WorkloadIdentity {
             runtime: Runtime::Bun,
             executable: Some("c:/tools/bun.exe".into()),
-            anchor: Some(if cfg!(windows) {
-                "f:/project".into()
-            } else {
-                "/srv/project".into()
-            }),
+            anchor: Some(project_path().into()),
             workload: "command:run:dev".into(),
         }
     }
@@ -311,7 +315,7 @@ mod tests {
             name: "project".into(),
             scope: RuleScope::Project,
             runtime: None,
-            project: Some("f:/project".into()),
+            project: Some(project_path().into()),
             workload: None,
             executable: None,
             created_at: 0,
