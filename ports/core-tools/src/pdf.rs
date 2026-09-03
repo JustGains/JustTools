@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "justpdf",
     about = "Inspect, merge, split, extract, or rotate PDFs.",
-    after_help = "PDF inputs are never removed. Page numbers are one-based; ranges look like 1-3,5,last.\nWith no command, one PDF shows info and multiple PDFs are merged to merged.pdf."
+    after_help = "PDF inputs are never removed. Page numbers are one-based; ranges look like 1-3,5,last.\nWith no command, one PDF shows info and multiple PDFs are merged to merged.pdf.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
 )]
 struct Cli {
     #[command(subcommand)]

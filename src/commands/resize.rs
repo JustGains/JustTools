@@ -44,7 +44,8 @@ Usage:
 
 Default: fit within 1920x1920, preserve aspect ratio, never upscale, use
 Lanczos3, keep the source, and write <name>-resized.<ext>. Images already
-within the requested bounds are left unchanged.
+within the requested bounds are left unchanged. Run bare to open the interactive
+launcher; explicit arguments bypass the UI.
 
 Options:
   -w, --width PX         Target width; height follows the aspect ratio

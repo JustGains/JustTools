@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::commands::image_ops;
 use crate::error::{ToolError, ToolResult};
 
 const TOOL: &str = "justrmbg";
@@ -32,6 +33,14 @@ pub fn prepare(inputs: &[PathBuf], output: Option<&Path>) -> ToolResult<JobSet> 
             return Err(ToolError::new(
                 TOOL,
                 format!("input not found: {}", input.display()),
+            ));
+        }
+        if input.is_file()
+            && !image_ops::STILL_EXTENSIONS.contains(&image_ops::extension(input).as_str())
+        {
+            return Err(ToolError::new(
+                TOOL,
+                format!("unsupported image: {}", input.display()),
             ));
         }
     }
@@ -69,13 +78,16 @@ pub fn prepare(inputs: &[PathBuf], output: Option<&Path>) -> ToolResult<JobSet> 
             .map_err(|error| ToolError::new(TOOL, error.to_string()))?
             .into_iter()
             .map(|entry| entry.path())
-            .filter(|path| path.is_file())
+            .filter(|path| {
+                path.is_file()
+                    && image_ops::STILL_EXTENSIONS.contains(&image_ops::extension(path).as_str())
+            })
             .collect::<Vec<_>>();
         files.sort();
         if files.is_empty() {
             return Err(ToolError::new(
                 TOOL,
-                format!("no files found in {}", inputs[0].display()),
+                format!("no supported images found in {}", inputs[0].display()),
             ));
         }
         files
@@ -250,5 +262,20 @@ mod tests {
 
         assert!(error.message().contains("input not found"));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn directory_batches_ignore_non_images_and_explicit_non_images_fail() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("notes.txt"), b"not an image").unwrap();
+        fs::write(directory.path().join("photo.png"), b"decoded later").unwrap();
+        let output = directory.path().join("results");
+
+        let jobs = prepare(&[directory.path().to_path_buf()], Some(&output)).unwrap();
+        assert_eq!(jobs.jobs.len(), 1);
+        assert!(jobs.jobs[0].input.ends_with("photo.png"));
+
+        let error = prepare(&[directory.path().join("notes.txt")], Some(&output)).unwrap_err();
+        assert!(error.message().contains("unsupported image"));
     }
 }

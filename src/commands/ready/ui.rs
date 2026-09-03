@@ -14,11 +14,7 @@ use ratatui::{DefaultTerminal, Frame};
 use super::catalog::{App, Platform};
 use super::detect::{self, Detection};
 use super::plan::{self, InstallPlan};
-
-const ACCENT: Color = Color::Rgb(104, 182, 255);
-const READY: Color = Color::Rgb(111, 214, 151);
-const RECOMMENDED: Color = Color::Rgb(245, 184, 90);
-const MUTED: Color = Color::Rgb(118, 128, 145);
+use crate::console_ui::{ACCENT, GOOD as READY, MUTED, SELECTED_BG, WARNING as RECOMMENDED};
 
 #[derive(Debug)]
 pub struct Selection {
@@ -342,7 +338,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut AppState) {
         Constraint::Length(3),
         Constraint::Min(7),
         Constraint::Length(detail_height),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .areas(frame.area());
     draw_header(frame, app, header);
@@ -457,7 +453,7 @@ fn draw_table(frame: &mut Frame<'_>, app: &mut AppState, area: Rect) {
     .block(Block::default().borders(Borders::ALL).title(title))
     .row_highlight_style(
         Style::default()
-            .bg(Color::Rgb(36, 48, 64))
+            .bg(SELECTED_BG)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     )
@@ -512,11 +508,32 @@ fn draw_footer(frame: &mut Frame<'_>, app: &AppState, area: Rect) {
             "↑↓ move  Space select  r recommended  a all  / search  Tab section  Enter install  ? help  q quit"
         }
     };
+    let mut ids = app
+        .selected_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    let command = if ids.is_empty() {
+        "justready --list".to_owned()
+    } else {
+        format!("justready --install {}", ids.join(","))
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!(" {} ", app.status), Style::default().fg(ACCENT)),
-            Span::styled(format!("  {keys}"), Style::default().fg(MUTED)),
-        ])),
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(format!(" {} ", app.status), Style::default().fg(ACCENT)),
+                Span::styled(format!("  {keys}"), Style::default().fg(MUTED)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Headless: ", Style::default().fg(MUTED)),
+                Span::styled(
+                    command,
+                    Style::default().fg(Color::Rgb(194, 145, 255)).bold(),
+                ),
+            ]),
+        ]),
         area,
     );
 }
@@ -662,6 +679,7 @@ mod tests {
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("JustReady"));
         assert!(rendered.contains("scanning installed apps"));
+        assert!(rendered.contains("Headless: justready --list"));
     }
 
     #[test]

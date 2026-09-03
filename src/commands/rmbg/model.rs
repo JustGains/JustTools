@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use atomic_write_file::AtomicWriteFile;
@@ -19,33 +19,51 @@ const MODEL_SHA256: &str = "5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a194
 const MAX_ARCHIVE_BYTES: u64 = 1_100_000_000;
 const MAX_MODEL_BYTES: u64 = 1_200_000_000;
 
-pub fn resolve(explicit: Option<&Path>) -> ToolResult<PathBuf> {
+pub fn resolve(explicit: Option<&Path>, download_approved: bool) -> ToolResult<PathBuf> {
+    if let Some(explicit) = explicit {
+        return require_override(explicit, "--model");
+    }
     let env_model = env::var_os("RMBG_MODEL")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    if let Some(env_model) = env_model {
+        return require_override(&env_model, "RMBG_MODEL");
+    }
     let sibling_model = env::current_exe().ok().and_then(|path| {
         path.parent()
             .map(|parent| parent.join("models").join(MODEL_NAME))
     });
     let cache_model = cache_model_path()?;
-    let candidates = [
-        explicit.map(Path::to_path_buf),
-        env_model.clone(),
-        sibling_model,
-        Some(cache_model.clone()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    if let Some(found) = candidates.iter().find(|candidate| candidate.is_file()) {
-        return Ok(found.clone());
+    let candidates = [sibling_model, Some(cache_model.clone())]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    for candidate in &candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        match verify_existing_model(candidate) {
+            Ok(()) => return Ok(candidate.clone()),
+            Err(error) if candidate == &cache_model => {
+                eprintln!(
+                    "{TOOL}: cached managed model failed verification and will be replaced: {}",
+                    error.message()
+                );
+                break;
+            }
+            Err(error) => return Err(error),
+        }
     }
 
-    let destination = explicit
-        .map(Path::to_path_buf)
-        .or(env_model)
-        .unwrap_or(cache_model);
-    confirm_download(&destination, &candidates)?;
+    let destination = cache_model;
+    if !download_approved {
+        confirm_download(&destination, &candidates)?;
+    } else {
+        eprintln!(
+            "{TOOL}: managed model is missing; --download approved verified installation to {}",
+            destination.display()
+        );
+    }
     download_and_extract(&destination)?;
     if !destination.is_file() {
         return Err(ToolError::new(
@@ -54,6 +72,57 @@ pub fn resolve(explicit: Option<&Path>) -> ToolResult<PathBuf> {
         ));
     }
     Ok(destination)
+}
+
+fn require_override(path: &Path, source: &str) -> ToolResult<PathBuf> {
+    if path.is_file() {
+        Ok(path.to_path_buf())
+    } else {
+        Err(ToolError::new(
+            TOOL,
+            format!(
+                "{source} model not found: {}; explicit model overrides are resolve-only and are never replaced or downloaded",
+                path.display()
+            ),
+        ))
+    }
+}
+
+fn verify_existing_model(path: &Path) -> ToolResult {
+    let metadata = fs::metadata(path).map_err(|error| ToolError::new(TOOL, error.to_string()))?;
+    if metadata.len() == 0 || metadata.len() > MAX_MODEL_BYTES {
+        return Err(ToolError::new(
+            TOOL,
+            format!("model has an invalid size: {}", path.display()),
+        ));
+    }
+    let mut reader = BufReader::new(
+        fs::File::open(path).map_err(|error| ToolError::new(TOOL, error.to_string()))?,
+    );
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    let expected = expected_hash("RMBG_MODEL_SHA256", MODEL_SHA256)?;
+    if actual != expected {
+        return Err(ToolError::new(
+            TOOL,
+            format!(
+                "model failed SHA-256 verification at {} (got {actual})",
+                path.display()
+            ),
+        ));
+    }
+    eprintln!("{TOOL}: verified model SHA-256 at {}", path.display());
+    Ok(())
 }
 
 fn cache_model_path() -> ToolResult<PathBuf> {
@@ -344,5 +413,14 @@ mod tests {
         let error = confirm_download_with(&destination, &[], true, &mut input).unwrap_err();
         assert!(error.message().contains("cancelled"));
         assert!(!destination.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn explicit_model_override_is_resolve_only_even_with_download_permission() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("custom.onnx");
+        let error = resolve(Some(&missing), true).unwrap_err();
+        assert!(error.message().contains("resolve-only"));
+        assert!(!missing.exists());
     }
 }

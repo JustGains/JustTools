@@ -13,6 +13,7 @@ use super::{
     scan::{ServerScanner, terminate_server},
     ui,
 };
+use crate::preferences;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Focus {
@@ -68,10 +69,15 @@ pub struct App {
     status_at: Instant,
     last_refresh: Instant,
     should_quit: bool,
+    preferences: preferences::Store,
 }
 
 impl App {
-    pub fn new(mut scanner: ServerScanner, show_all: bool) -> anyhow::Result<Self> {
+    pub fn new(
+        mut scanner: ServerScanner,
+        show_all: bool,
+        preferences: preferences::Store,
+    ) -> anyhow::Result<Self> {
         let servers = scanner.scan()?;
         let mut history_store = HistoryStore::load()?;
         history_store.record(&servers)?;
@@ -98,6 +104,7 @@ impl App {
             status_at: Instant::now(),
             last_refresh: Instant::now(),
             should_quit: false,
+            preferences,
         })
     }
 
@@ -229,7 +236,16 @@ impl App {
             KeyCode::Char('a') => {
                 self.view = self.view.toggle();
                 self.reset_selection();
-                self.set_status(format!("Showing {}", self.view.label()));
+                let saved = matches!(self.view, View::All).then_some("true");
+                match self.preferences.set("justports", "show_all", saved) {
+                    Ok(()) => {
+                        self.set_status(format!("Showing {} — default saved", self.view.label()))
+                    }
+                    Err(error) => self.set_status(format!(
+                        "Showing {} — could not save default: {error:#}",
+                        self.view.label()
+                    )),
+                }
             }
             KeyCode::Char('r') => self.refresh_now(true),
             KeyCode::Enter => match self.focus {

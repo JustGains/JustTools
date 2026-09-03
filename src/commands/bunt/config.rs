@@ -1,10 +1,12 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
+use atomic_write_file::AtomicWriteFile;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +38,9 @@ pub struct Behavior {
     pub refresh_ms: u64,
     pub grace_period_ms: u64,
     pub confirm_kill_all: bool,
+    pub view_filter: String,
+    pub runtime_filter: String,
+    pub sort_key: String,
 }
 
 impl Default for Behavior {
@@ -44,6 +49,9 @@ impl Default for Behavior {
             refresh_ms: 900,
             grace_period_ms: 1_200,
             confirm_kill_all: true,
+            view_filter: "all".into(),
+            runtime_filter: "all".into(),
+            sort_key: "name".into(),
         }
     }
 }
@@ -222,14 +230,27 @@ impl ConfigStore {
         Ok(Some(removed.name))
     }
 
+    pub fn set_display_defaults(&mut self, view: &str, runtime: &str, sort: &str) -> Result<()> {
+        self.config.behavior.view_filter = view.into();
+        self.config.behavior.runtime_filter = runtime.into();
+        self.config.behavior.sort_key = sort.into();
+        self.save()
+    }
+
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let serialized = toml::to_string_pretty(&self.config)?;
-        fs::write(&self.path, serialized)
-            .with_context(|| format!("failed to write {}", self.path.display()))
+        let mut output = AtomicWriteFile::open(&self.path)
+            .with_context(|| format!("failed to stage {}", self.path.display()))?;
+        output
+            .write_all(serialized.as_bytes())
+            .with_context(|| format!("failed to write {}", self.path.display()))?;
+        output
+            .commit()
+            .with_context(|| format!("failed to save {}", self.path.display()))
     }
 }
 

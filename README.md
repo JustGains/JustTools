@@ -9,8 +9,6 @@ creates native aliases, so the same binary runs as `justjson`, `justpdf`,
 > Try JustGains for a fast, focused way to build workouts, track progress, and
 > get stronger.
 
-![The JustTools command browser listing its native tools in Windows PowerShell](docs/images/just-browser.png)
-
 ## Install
 
 Install the correct published release archive, verify its SHA-256 checksum, install
@@ -53,7 +51,7 @@ If the install directory is not on `PATH`, the `just` browser offers
 **Add To Path**. The direct commands are `just add-to-path` and
 `just install`. Open a new terminal after changing `PATH`.
 
-Bootstrap overrides are optional: `JUSTTOOLS_VERSION=v2.4.0` pins a release,
+Bootstrap overrides are optional: `JUSTTOOLS_VERSION=v2.5.0` pins a release,
 `JUSTTOOLS_BIN` selects the install directory, and `JUSTREADY_NO_RUN=1` installs
 without opening the picker. `JUSTTOOLS_ARCHIVE` points either bootstrap at a
 local release archive, which makes the same install path directly testable from
@@ -61,19 +59,32 @@ this repository.
 
 ## Commands and defaults
 
+Run any direct tool with no arguments to open its clean full-screen console UI.
+Settings marked `saved` become that tool's default immediately, and the bottom
+line continuously shows the exact **Headless:** command for the current choices.
+Inputs, QR payloads, credentials, confirmation bypasses, and one-run actions
+such as kill, push, repair, runtime check, and dry run are never remembered.
+
+Any explicit argument keeps the traditional direct behavior, so scripts and
+pipes do not open a UI. Use `just --defaults-path` to locate the atomic per-user
+defaults file, `D` inside a launcher to reset that tool, and see the
+[console UI and persistence guide](docs/console-ui.md) for the complete key map,
+saved-setting matrix, and conflict rules.
+
 | Command | Opinionated default |
 | --- | --- |
-| `just` | Browse or directly dispatch every command; offer Add To Path when needed |
+| `just` | Full-screen command browser; directly dispatch every command and offer Add To Path when needed |
 | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; keep the source |
-| `justavif` | AV1 still image, quality 60, speed 6; install only when smaller |
+| `justavif` | Quality 60/speed 6; blank output removes the source only after a smaller AVIF is safe |
 | `justbunt` / `bunt` | Smart TUI to inspect, persistently protect, and stop Node/Bun/Python processes |
-| `justcommit` | Stage the worktree, generate a bounded AI summary/message, commit, and optionally push |
+| `justcommit` | Console defaults to the complete worktree, bounded AI summary/message, commit, and optional push |
 | `justcrop` | Trim transparent borders per image or use folder-wide shared bounds for aligned animation frames |
 | `justjpg` | Quality 85 progressive 4:2:0 JPEG, optimized Huffman tables, white alpha background |
 | `justjson` | Pretty-print in place with two spaces and a final newline |
 | `justmp3` | LAME VBR quality 2, 48 kHz; keep the source |
+| `justoptimize` | Encode real PNG/WebP/JPEG candidates, preserve needed alpha, and choose the smallest |
 | `justpdf` | Show info for one PDF or merge several into `merged.pdf` |
-| `justpng` | pngquant quality 65-90, speed 3; replace only when smaller |
+| `justpng` | pngquant quality 65-90, speed 3; optimize the same PNG path only when smaller |
 | `justport` | Show the owner of exact local ports; guarded same-user kill is optional |
 | `justports` | Live TUI with Running Now, automatic server saving, and one-key Launch Again |
 | `justqr` | 1024 px, error-Q, four-module margin, black-on-white `qr.png` |
@@ -83,10 +94,11 @@ this repository.
 | `justsvg` | Conservative multipass SVGOMG-style optimization, precision 3 |
 | `justvideo` | 720p H.264 MP4, CRF 28, medium preset, AAC 128 kb/s |
 | `justwav` | Stereo 16-bit PCM WAV at 48 kHz; keep the source |
-| `justwebp` | Quality 82, method 5 WebP; replace only when smaller |
+| `justwebp` | Quality 82/method 5; blank output removes the source only after a smaller WebP is safe |
 | `justzip` | Smallest-compression ZIP from Git's exact tracked/unignored file set |
 
-Run `just`, `just --help`, or `just help qr`. Short dispatch stays quick:
+Run `just`, `just --help`, or `just help qr`. Bare commands open their UI;
+explicit arguments are the headless form and short dispatch stays quick:
 
 ```sh
 just qr "https://example.com"
@@ -96,6 +108,7 @@ just resize photo.jpg --width 1200
 just json package.json
 just pdf report-a.pdf report-b.pdf
 just mp3 interview.mov
+just optimize hero.png --dry-run
 just port 4321
 just ports
 just ports --snapshot
@@ -111,6 +124,9 @@ to persistently protect the selected workload and `K` to stop every current
 non-protected target. Its PID-reuse checks, launcher-ancestry protection,
 stable table ordering, smart filtering, and responsive staged shutdown flow are
 described in the [bunt guide](docs/bunt.md).
+Its bottom line always exposes the equivalent read-only headless snapshot
+command. View, runtime-filter, and sort changes are saved immediately in bunt's
+dedicated configuration.
 
 ## JustPorts development server browser
 
@@ -120,7 +136,7 @@ directory to find project metadata. Package, Cargo, Python, Go, .NET, Ruby, and
 PHP markers supply project names; known commands and dependencies identify
 stacks such as Vite, Next.js, Astro, Expo/Metro, Uvicorn, Django, Rails, and
 .NET. The default view keeps likely development servers prominent, while `a`
-reveals every listener.
+reveals every listener and saves that view as the next bare-run default.
 
 The upper panel contains servers running now. Press `Enter` or `o` to open the
 selected URL in the default browser, `p` to open its project folder, `/` to
@@ -213,6 +229,8 @@ Flatpak, Flathub, `curl`, or `bash` prerequisites are included in the review pla
 TUI restores the terminal before execution, leaving UAC/password prompts and
 native installer progress fully visible. See the [JustReady guide](docs/ready.md)
 for the catalog, dependency model, automation contract, and keys.
+The footer turns the current selection into a direct `justready --install ...`
+command (or `justready --list` when nothing is selected).
 
 ## Consistent file handling
 
@@ -228,6 +246,11 @@ for the catalog, dependency model, automation contract, and keys.
   low-friction, while `--yes` makes automation intentional.
 - Audio tools keep sources unless `--replace` is explicit. WebP and AVIF remove
   a beside-source original only after a smaller replacement is complete.
+- JustOptimize is source-preserving by default. It writes
+  `<name>-optimized.<chosen-format>` beside the source, or `<name>.<chosen-format>`
+  under `--output`. It encodes and measures actual PNG, WebP, and eligible JPEG
+  candidates; any non-opaque pixel excludes JPEG. `--replace` is the only mode
+  that removes or replaces a source, and only after atomic installation.
 - APNG, animated WebP/AVIF, multi-page TIFF, and AVIF transparency are rejected
   where a still-image conversion would silently discard content.
 - Crop applies EXIF orientation, trims to alpha values above the selected
@@ -257,8 +280,8 @@ Third-party attribution for the native JPEG encoder ships in
 
 ## Dependencies: discover, explain, confirm
 
-Pure-Rust bunt, crop, JPG, JSON, PDF, QR, resize, SVG, and port operations have
-no external runtime dependencies. Other commands resolve dependencies only
+Self-contained bunt, crop, JPG, JustOptimize, JSON, PDF, QR, resize, SVG, and
+port operations have no external runtime dependencies. Other commands resolve dependencies only
 when invoked:
 
 | Commands | Dependency | Confirmed acquisition |
@@ -270,11 +293,14 @@ when invoked:
 | Commit | Git + OpenRouter API key | Git via native package manager; key supplied by the user |
 | RMBG | ONNX Runtime + BRIA model | checksum-pinned official Microsoft runtime packages, then the checksum-pinned `m.justgains.com` model archive |
 
-When something is missing, JustTools prints the exact source and command, then
+When something is missing, JustTools normally prints the exact source and command, then
 asks `[y/N]`. It runs the installer only after a real `y`/`yes` from an
 interactive terminal. Redirected input, CI, and other non-interactive runs
 never install or download anything; they return actionable instructions
-instead. Declining leaves the filesystem unchanged.
+instead. Declining leaves the filesystem unchanged. JustRMBG's launcher visibly
+enables `--download`; choosing Run therefore installs its pinned managed runtime
+and model without a second prompt. Headless use requires an explicit
+`--download` to grant the same permission.
 
 For file-processing commands, dependency installation cannot be bypassed with
 `--yes`. That flag applies to the requested file operation or JustTools' own
@@ -307,6 +333,7 @@ Provider selection is explicit when needed:
 
 ```sh
 justrmbg image.jpg                         # Auto; acceleration preferred, CPU use disclosed
+justrmbg image.jpg --download              # install missing pinned runtime/model automatically
 justrmbg --check --gpu                    # strict platform GPU; never CPU
 justrmbg image.jpg --provider cpu         # strict CPU
 justrmbg image.jpg --provider directml    # strict DirectML
@@ -325,24 +352,27 @@ On Windows x64, Auto can install a managed DirectML runtime assembled from
 checksum-pinned official Microsoft ONNX Runtime DirectML and DirectML packages.
 The complete flavor-specific cache—including companion DLLs, licenses, notices,
 and its manifest—is verified before reuse. A partial or corrupt cache is repaired
-only through the normal confirmed download path. Other platforms use the managed
-portable CPU runtime by default. CUDA and CoreML remain advanced bring-your-own
+through the same pinned download path after an interactive confirmation or
+explicit `--download`. Other platforms use the managed portable CPU runtime by
+default. CUDA and CoreML remain advanced bring-your-own
 options: set `ORT_DYLIB_PATH` to the **absolute path** of a compatible,
 provider-enabled ONNX Runtime library and supply its matching native dependencies.
 Relative paths and Windows PATH-only/bare-DLL discovery are intentionally rejected
 to prevent loading an unintended runtime such as a private System32 copy.
 
-Runtime acquisition is offered only in an interactive terminal and is verified by
-exact byte size and SHA-256 before atomic installation. A non-interactive process
-never downloads a missing dependency. `ORT_DYLIB_PATH` is authoritative and
-resolve-only; JustTools does not replace the runtime it names.
+Runtime acquisition is offered after interactive confirmation or explicit
+`--download` and is verified by exact byte size and SHA-256 before atomic
+installation. A non-interactive process never downloads a missing RMBG
+dependency unless `--download` grants that operation. `ORT_DYLIB_PATH` is
+authoritative and resolve-only; JustTools does not replace the runtime it names.
 
 After the runtime is ready, the BRIA RMBG-2.0 archive is fetched from
 `https://m.justgains.com/tools/rmbg-2.0.zip`, verified by SHA-256, selectively
 extracted, and installed atomically in the per-user cache. Use `--model` or
 `RMBG_MODEL` for an existing ONNX file. Custom mirrors require both
 `RMBG_MODEL_ARCHIVE_SHA256` and `RMBG_MODEL_SHA256` alongside
-`RMBG_MODEL_URL`.
+`RMBG_MODEL_URL`. Every inference run prints the resolved model path before
+session creation.
 
 BRIA publishes the RMBG-2.0 weights for non-commercial use. Commercial use
 requires a separate agreement; review the
@@ -387,7 +417,8 @@ cargo build --locked --release -p justtools
 The test suite exercises every advertised command through the root binary,
 native alias installation and rollback, non-interactive dependency refusal,
 real JSON/PDF/QR/SVG/port behavior, JustReady catalog/planning/TUI states,
-bunt filtering/configuration/TUI states, bounded JustCommit scanning and a real
+bunt filtering/configuration/TUI states, launcher coverage and atomic defaults
+persistence, bounded JustCommit scanning and a real
 Git commit through a local OpenRouter-compatible test server,
 Git-accurate ZIP creation, media safety, native crop/JPG/resize behavior, and
 offline RMBG acquisition logic. CI also
@@ -399,7 +430,7 @@ use their current Node 24-based major releases.
 
 Every push and pull request keeps its native archives and SHA-256 sidecars on
 the Actions run. CI exercises `ready.ps1` or `ready.sh` against each packaged
-archive before upload. A version tag matching `Cargo.toml`, such as `v2.4.0`,
+archive before upload. A version tag matching `Cargo.toml`, such as `v2.5.0`,
 additionally creates a GitHub Release and attaches all six archives and their
 checksums. Re-running the release job safely
 replaces its existing assets.

@@ -11,12 +11,13 @@
 | Crop transparent borders | `justcrop` | Per-image or folder-wide shared alpha bounds, same format, keep source |
 | Create optimized JPEG | `justjpg` | Quality 85 progressive 4:2:0, white alpha background, keep source |
 | Resize still images | `justresize` | Fit within 1920x1920, no upscale, same format, keep source |
-| Optimize PNG | `justpng` | pngquant quality 65-90; replace only when smaller |
-| Convert to WebP | `justwebp` | Quality 82/method 5; replace only when smaller |
-| Convert to AVIF | `justavif` | AV1 quality 60/speed 6; replace only when smaller |
+| Optimize PNG | `justpng` | pngquant quality 65-90; same path only when smaller |
+| Convert to WebP | `justwebp` | Blank output removes source only after a smaller WebP is safe |
+| Convert to AVIF | `justavif` | Blank output removes source only after a smaller AVIF is safe |
 | Optimize video | `justvideo` | 720p H.264 MP4, CRF 28, AAC 128 kb/s |
 | Extract/convert audio | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz |
 | Create MP3 | `justmp3` | LAME VBR quality 2, 48 kHz |
+| Choose the best web image | `justoptimize` | Measure PNG/WebP/JPEG; preserve alpha; keep source |
 | Create WAV | `justwav` | Stereo 16-bit PCM, 48 kHz |
 | Work with JSON | `justjson` | Format, validate, query, or minify |
 | Work with PDF | `justpdf` | Inspect, merge, split, extract, or rotate |
@@ -29,6 +30,13 @@
 
 Every direct alias also works through short dispatch: `just resize`, `just pdf`,
 `just rmbg`, and so on.
+
+Every bare direct alias opens a standardized full-screen console. Changed rows
+marked `saved` persist immediately, while inputs, credentials, confirmation
+bypasses, and one-run action/safety switches do not. The bottom line shows the
+exact headless command. Supplying any explicit argument or piping stdin bypasses
+the UI. `just --defaults-path` prints the shared defaults file; `D` resets the
+current tool's saved overrides.
 
 ## Software setup examples
 
@@ -66,7 +74,9 @@ just bunt
 
 Inside the TUI, `e` toggles a persistent workload exclusion, `/` opens smart
 filtering, `x` stops the selected target, and `K` stops the revalidated snapshot
-of every non-protected target. Launcher ancestry is always safety-protected.
+of every non-protected target. View, runtime-filter, and sort changes save as
+the next defaults. Launcher ancestry is always safety-protected, and the footer
+shows the read-only `justbunt --snapshot` headless form.
 
 ## Development server browser examples
 
@@ -138,10 +148,27 @@ composites transparency onto white, uses progressive output, and strips
 metadata by default. Both commands keep source files unless `--replace` is
 explicit.
 
+## Automatic web-image optimization
+
+```sh
+justoptimize hero.png --dry-run
+justoptimize hero.png
+justoptimize assets --recursive --output web --dry-run
+justoptimize assets --recursive --output web --yes
+```
+
+JustOptimize is self-contained and needs no external encoder. It measures real
+PNG, WebP, and eligible progressive JPEG outputs. Any non-opaque pixel excludes
+JPEG, while PNG and WebP retain alpha. The default keeps the source and writes
+`<name>-optimized.<best>` only when an encoded candidate is smaller than an
+already-web-ready original. `--output` keeps sources and writes `<name>.<best>`
+under that folder; `--replace` is the only source-removing mode.
+
 ## Background removal examples
 
 ```sh
 justrmbg portrait.jpg
+justrmbg portrait.jpg --download
 justrmbg --check
 justrmbg --check --gpu
 justrmbg portrait.jpg --provider cpu
@@ -161,8 +188,9 @@ Windows x64 can use
 the verified managed DirectML bundle. CUDA and CoreML require an absolute
 `ORT_DYLIB_PATH` naming a compatible provider-enabled runtime; relative and
 PATH-only DLL lookup is rejected. A non-interactive run never downloads a
-missing runtime. Normal inference may offer verified runtime/model acquisition
-only after interactive consent. BRIA RMBG-2.0 weights are non-commercial unless
+missing runtime unless `--download` is explicit. The bare launcher visibly
+enables that one-run permission, so Run can fetch the pinned runtime/model
+without another prompt. BRIA RMBG-2.0 weights are non-commercial unless
 separately licensed.
 
 Multiple explicit images form a batch and a supplied `--output` is then a
@@ -179,12 +207,14 @@ justwebp assets --recursive --output optimized --yes
 
 Use the command-specific help because not every option applies to every tool.
 `--output` generally keeps sources. `--replace` is explicit and destructive.
+The launchers keep the resolved output pattern and overwrite/source policy
+visible above the Headless command.
 
 ## Structured and document examples
 
 ```sh
 just json data.json
-just json data.json --query user.name
+just json data.json --get user.name
 just pdf report-a.pdf report-b.pdf
 just svg icon.svg
 just qr "https://example.com" --output link.png

@@ -31,6 +31,12 @@ If JustTools is already installed:
 justready
 ```
 
+The footer continuously translates the selection into
+`justready --install ID[,ID...]`; with no selected apps it shows
+`justready --list`. Selections are installation targets for this run and are
+not persisted as defaults. See the shared [console UI guide](console-ui.md) for
+the suite-wide footer and persistence contract.
+
 The picker opens immediately while installed software is scanned in a
 background thread. Press `r` to choose every missing recommendation, review the
 plan with `Enter`, then confirm. JustReady closes the TUI before starting

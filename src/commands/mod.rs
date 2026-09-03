@@ -12,6 +12,7 @@ mod image_ops;
 pub mod jpg;
 pub mod json;
 mod media;
+pub mod optimize;
 pub mod pdf;
 pub mod png;
 pub mod port;
@@ -63,6 +64,10 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "justmp3",
         description: "convert audio or video soundtracks to high-quality MP3",
+    },
+    CommandInfo {
+        name: "justoptimize",
+        description: "choose the smallest web-ready PNG, WebP, or JPEG safely",
     },
     CommandInfo {
         name: "justpdf",
@@ -123,9 +128,24 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> ToolResult {
         println!("{command} {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if args.is_empty()
+        && crate::common::stdin_is_terminal()
+        && crate::common::stdout_is_terminal()
+        && crate::launcher::supports(command)
+    {
+        return match crate::launcher::run(command)? {
+            Some(configured) => dispatch_headless(command, configured),
+            None => Ok(()),
+        };
+    }
+    dispatch_headless(command, args)
+}
+
+fn dispatch_headless(command: &str, args: Vec<OsString>) -> ToolResult {
     match command {
         "justaudio" => audio::run(audio::Mode::Aac, args),
         "justmp3" => audio::run(audio::Mode::Mp3, args),
+        "justoptimize" => optimize::run(args),
         "justwav" => audio::run(audio::Mode::Wav, args),
         "justavif" => avif::run(args),
         "justbunt" => bunt::run(args),

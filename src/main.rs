@@ -1,9 +1,12 @@
 mod commands;
 mod common;
+mod console_ui;
 mod deps;
 mod error;
 mod install;
+mod launcher;
 mod pathing;
+mod preferences;
 mod selector;
 
 use std::ffi::OsString;

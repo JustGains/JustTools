@@ -81,8 +81,8 @@ Usage:
 Default: crop every image independently to pixels with nonzero alpha, keep the
 source, preserve the format, and write <name>-cropped.<ext>. Fully transparent
 canvases become a minimal 1x1 transparent image. Images already at their bounds
-are unchanged. With no input in a terminal, justcrop asks which bounds mode to
-use and processes the current folder.
+are unchanged. Run bare to open the interactive launcher; its Headless footer
+shows the direct command. Explicit arguments and pipes bypass the UI.
 
 Options:
   -t, --threshold N      Ignore alpha values at or below N, 0-254 (default: 0)

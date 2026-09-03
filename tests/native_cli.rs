@@ -14,6 +14,7 @@ const COMMANDS: &[&str] = &[
     "justjpg",
     "justjson",
     "justmp3",
+    "justoptimize",
     "justpdf",
     "justpng",
     "justport",
@@ -120,6 +121,22 @@ fn selector_lists_and_dispatches_every_command() {
         let version = run(&[short, "--version"]);
         assert!(version.status.success(), "{command} --version failed");
     }
+}
+
+#[test]
+fn selector_reports_an_overridden_defaults_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("launcher-defaults.toml");
+    let output = Command::new(binary())
+        .arg("--defaults-path")
+        .env("JUSTTOOLS_DEFAULTS", &path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        path.display().to_string()
+    );
 }
 
 #[test]
@@ -879,7 +896,7 @@ fn image_tool_dry_runs_do_not_create_output_directories() {
         .save(&input)
         .unwrap();
 
-    for tool in ["crop", "jpg"] {
+    for tool in ["crop", "jpg", "optimize"] {
         let output = directory.path().join(format!("{tool}-output"));
         let result = Command::new(binary())
             .arg(tool)
@@ -896,6 +913,96 @@ fn image_tool_dry_runs_do_not_create_output_directories() {
         );
         assert!(!output.exists(), "just{tool} dry run created output");
     }
+}
+
+#[test]
+fn optimize_preserves_transparency_and_reports_the_exact_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("transparent.png");
+    let output = directory.path().join("web");
+    let mut image = image::RgbaImage::from_pixel(96, 64, image::Rgba([20, 80, 160, 0]));
+    for y in 8..56 {
+        for x in 12..84 {
+            image.put_pixel(x, y, image::Rgba([220, 40, 80, 180]));
+        }
+    }
+    image.save(&input).unwrap();
+
+    let result = Command::new(binary())
+        .arg("optimize")
+        .arg(&input)
+        .args(["--output"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "justoptimize failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(input.is_file());
+    let outputs = fs::read_dir(&output)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_ne!(
+        outputs[0]
+            .path()
+            .extension()
+            .and_then(|value| value.to_str()),
+        Some("jpg")
+    );
+    assert!(
+        image::open(outputs[0].path())
+            .unwrap()
+            .to_rgba8()
+            .pixels()
+            .any(|pixel| pixel[3] < 255)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains("transparency preserved"));
+    assert!(stdout.contains(&outputs[0].path().display().to_string()));
+}
+
+#[test]
+fn optimize_replace_removes_non_web_source_only_after_output_exists() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("photo.bmp");
+    image::RgbImage::from_fn(128, 96, |x, y| {
+        image::Rgb([(x % 255) as u8, (y % 255) as u8, ((x + y) % 255) as u8])
+    })
+    .save(&input)
+    .unwrap();
+
+    let result = Command::new(binary())
+        .arg("optimize")
+        .arg(&input)
+        .args(["--replace", "--yes"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "justoptimize --replace failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!input.exists());
+    let outputs = fs::read_dir(directory.path())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert!(matches!(
+        outputs[0]
+            .path()
+            .extension()
+            .and_then(|value| value.to_str()),
+        Some("png" | "webp" | "jpg")
+    ));
+    assert_eq!(
+        image::image_dimensions(outputs[0].path()).unwrap(),
+        (128, 96)
+    );
 }
 
 #[test]

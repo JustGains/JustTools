@@ -10,12 +10,10 @@ use super::{
     app::{App, Mode},
     model::Runtime,
 };
-
-const TARGET_COLOR: Color = Color::Rgb(111, 214, 151);
-const EXCLUDED_COLOR: Color = Color::Rgb(245, 184, 90);
-const SAFETY_COLOR: Color = Color::Rgb(130, 160, 195);
-const MUTED_COLOR: Color = Color::Rgb(118, 128, 145);
-const ACCENT_COLOR: Color = Color::Rgb(104, 182, 255);
+use crate::console_ui::{
+    ACCENT as ACCENT_COLOR, GOOD as TARGET_COLOR, MUTED as MUTED_COLOR, SECONDARY as SAFETY_COLOR,
+    SELECTED_BG, WARNING as EXCLUDED_COLOR,
+};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
@@ -24,7 +22,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Constraint::Length(3),
         Constraint::Min(6),
         Constraint::Length(detail_height),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .areas(area);
 
@@ -139,7 +137,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(title))
         .row_highlight_style(
             Style::default()
-                .bg(Color::Rgb(36, 48, 64))
+                .bg(SELECTED_BG)
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )
@@ -245,6 +243,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(vec![
             Line::from(Span::styled(keys, MUTED_COLOR)),
             Line::from(Span::styled(status, ACCENT_COLOR)),
+            Line::from(vec![
+                Span::styled("Headless: ", MUTED_COLOR),
+                Span::styled("justbunt --snapshot", bold(Color::Rgb(194, 145, 255))),
+            ]),
         ]),
         area,
     );
@@ -508,6 +510,12 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .to_string()
+                .contains("Headless: justbunt --snapshot")
+        );
         app.mode = Mode::Help;
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         app.close_operation = Some(CloseOperation::new(PendingKill {

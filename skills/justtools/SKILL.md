@@ -28,6 +28,9 @@ Claude-only or Codex-only tool name when a normal shell operation is sufficient.
 2. Choose the narrowest command. Load
    [references/commands.md](references/commands.md) only when its command map or
    examples are needed.
+   A bare command opens the interactive console UI. For agent execution, pass
+   the explicit input or automation switch shown in the UI's `Headless:` footer
+   so a TUI is never started accidentally.
 3. Read `<command> --help` before using unfamiliar or destructive options.
 4. For a folder, recursion, replacement, or many files, run `--dry-run` first
    and inspect the resolved inputs and outputs when the command supports it. A
@@ -46,7 +49,10 @@ Claude-only or Codex-only tool name when a normal shell operation is sufficient.
 
 Some media commands need FFmpeg, pngquant, cwebp, or Git. RMBG may need ONNX
 Runtime and its model. JustTools discovers these only when needed and asks for
-interactive confirmation before installing or downloading them.
+interactive confirmation before installing or downloading them. JustRMBG's
+launcher is explicit about the exception: its one-run **Install dependencies**
+row emits `--download`, so choosing Run grants that verified managed download
+without a second prompt. A headless run must pass `--download` explicitly.
 
 `justready` is intentionally a system-software installer. Use it only when the
 user asked to prepare the machine or install apps. Start with `justready --list`
@@ -55,13 +61,14 @@ without clear authorization to execute that plan. It may legitimately invoke
 WinGet, Homebrew, a Linux package manager, Flatpak, or a fixed official
 installer and may surface UAC or `sudo` prompts.
 
-- Never pipe `yes`, synthesize terminal input, or otherwise bypass a dependency
-  confirmation.
+- Never pipe `yes` or synthesize terminal input. Use JustRMBG's explicit
+  `--download` only when the user has authorized its pinned runtime/model.
 - `--yes` approves the requested file operation; it does not approve third-party
   dependency installation.
-- An agent's non-interactive process will intentionally refuse acquisition. If
-  a dependency is missing, show the user the exact command/source JustTools
-  reports and ask them to run or approve it in an interactive terminal.
+- An agent's non-interactive process will intentionally refuse acquisition
+  unless the user explicitly authorized JustRMBG's `--download`. If another
+  dependency is missing, show the exact command/source JustTools reports and
+  ask the user to run or approve it in an interactive terminal.
 - Explicit `*_BIN`, `RMBG_MODEL`, and `ORT_DYLIB_PATH` overrides are resolve-only;
   do not replace them without checking the user's environment. `ORT_DYLIB_PATH`
   must be an absolute path to a compatible provider-enabled runtime; PATH-only
@@ -108,8 +115,17 @@ installer and may surface UAC or `sudo` prompts.
 
 ## Quick defaults
 
+Interactive changes marked `saved` persist atomically per tool and every TUI
+shows its direct headless equivalent at the bottom. Inputs, payloads,
+credentials, confirmation bypasses, and one-run kill/push/repair/check/dry-run
+actions are intentionally never stored. Use `just --defaults-path` to locate
+the shared file.
+
 - `justresize image.jpg`: fit inside 1920x1920, preserve format/aspect ratio,
   keep the source, and write `image-resized.jpg`.
+- `justoptimize image.png`: encode and measure PNG/WebP/JPEG candidates, retain
+  transparency when needed, keep the source, and write the smallest useful
+  result as `image-optimized.<best-format>`.
 - `justcrop image.png`: trim to nonzero-alpha bounds, preserve format, keep the
   source, and write `image-cropped.png`.
 - `justcrop frames --shared-bounds`: union visible bounds within each folder so
@@ -135,7 +151,8 @@ installer and may surface UAC or `sudo` prompts.
   existing index and `--push` only with authorization.
 - `justrmbg image.jpg`: prefer acceleration, disclose any CPU-supported model
   nodes or full CPU fallback in Auto, keep the source, and write
-  `image-nobg.png`.
+  `image-nobg.png`. Its launcher visibly passes `--download`, allowing the
+  pinned managed runtime/model to install without a second prompt.
 - `justrmbg --check`: test runtime/provider session creation and tiny inference
   without resolving or downloading the BRIA model.
 - `just zip`: archive Git's exact tracked and unignored working-tree files.

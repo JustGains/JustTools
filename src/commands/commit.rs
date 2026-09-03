@@ -32,6 +32,9 @@ const HELP: &str = r#"justcommit — Quickly stage, summarize, and commit change
 Usage:
   justcommit [options] [directory]
 
+Run bare to open the interactive launcher. Its Headless footer shows the exact
+direct command and explicit arguments bypass the UI.
+
 The directory must be inside a Git working tree. JustCommit stages the complete
 working tree by default, sends a tightly bounded digest to OpenRouter, prints the
 summary and proposed message, then runs `git commit`. It never uploads a whole
@@ -57,12 +60,12 @@ Commit instructions:
   conventional-style subject and a useful explanatory body.
 
 Examples:
-  justcommit
-  justcommit --push
-  justcommit --staged
-  justcommit --dry-run --model anthropic/claude-haiku-4.5
+  justcommit .
+  justcommit . --push
+  justcommit . --staged
+  justcommit . --dry-run --model anthropic/claude-haiku-4.5
   justcommit -C ../project --api-key "$OPENROUTER_API_KEY"
-  justcommit --repair"#;
+  justcommit . --repair"#;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepairAgent {

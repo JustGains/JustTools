@@ -7,11 +7,10 @@ use ratatui::{
 };
 
 use super::app::{App, Focus, Mode};
-
-const DEV_COLOR: Color = Color::Rgb(111, 214, 151);
-const ACCENT_COLOR: Color = Color::Rgb(104, 182, 255);
-const FRAMEWORK_COLOR: Color = Color::Rgb(194, 145, 255);
-const MUTED_COLOR: Color = Color::Rgb(118, 128, 145);
+use crate::console_ui::{
+    ACCENT as ACCENT_COLOR, GOOD as DEV_COLOR, MUTED as MUTED_COLOR, SECONDARY as FRAMEWORK_COLOR,
+    SELECTED_BG,
+};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let detail_height = if frame.area().height >= 31 { 8 } else { 6 };
@@ -27,7 +26,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Constraint::Min(6),
         Constraint::Length(recent_height),
         Constraint::Length(detail_height),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .areas(frame.area());
 
@@ -294,6 +293,17 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(vec![
             Line::from(Span::styled(keys, MUTED_COLOR)),
             Line::from(Span::styled(app.status_text(), ACCENT_COLOR)),
+            Line::from(vec![
+                Span::styled("Headless: ", MUTED_COLOR),
+                Span::styled(
+                    if matches!(app.view, super::app::View::All) {
+                        "justports --snapshot --all"
+                    } else {
+                        "justports --snapshot"
+                    },
+                    bold(FRAMEWORK_COLOR),
+                ),
+            ]),
         ]),
         area,
     );
@@ -399,7 +409,7 @@ fn bold(color: Color) -> Style {
 fn highlight_style(focused: bool) -> Style {
     if focused {
         Style::default()
-            .bg(Color::Rgb(36, 48, 64))
+            .bg(SELECTED_BG)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
     } else {

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 #[command(
     name = "justsvg",
     about = "Optimize SVGs with a Rust-native SVGOMG-style engine.",
-    after_help = "The conservative preset preserves viewBox, IDs, title, description, XML namespaces,\nand accessibility attributes. Files are replaced only when optimization makes them smaller."
+    after_help = "The conservative preset preserves viewBox, IDs, title, description, XML namespaces,\nand accessibility attributes. Files are replaced only when optimization makes them smaller.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
 )]
 struct Cli {
     /// Decimal precision, 0-5 (default: 3).

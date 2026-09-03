@@ -40,7 +40,10 @@ Usage:
 
 Default: quality 85, progressive 4:2:0 JPEG, box-averaged chroma, optimized
 Huffman tables, white alpha background, stripped metadata, and source kept.
-Beside-source outputs are named <name>-optimized.jpg.
+Beside-source outputs are named <name>-optimized.jpg; --output writes
+<DIR>/<name>.jpg and keeps sources. Existing destinations are replaced
+atomically. Run bare to open the interactive launcher; explicit arguments
+bypass the UI.
 
 Options:
   -q, --quality N        JPEG quality, 1-100 (default: 85)

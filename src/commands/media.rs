@@ -116,15 +116,17 @@ struct Options {
 }
 
 fn help(mode: MediaMode) -> String {
-    match mode {
+    let help = match mode {
         MediaMode::Png => format!(
             r#"justpng — Optimize PNG files quickly with pngquant.
 
 Usage:
   justpng [options] [file-or-folder ...]
 
-PNGs are replaced atomically only when the result is smaller. Folders scan
-direct children unless --recursive is used. Animated PNGs are rejected.
+With no output folder, each source PNG is replaced atomically only when the
+result is smaller. --output writes <DIR>/<same-name>.png, keeps the source, and
+atomically replaces an existing destination. Folders scan direct children
+unless --recursive is used. Animated PNGs are rejected.
 
 Options:
   -q, --quality MIN-MAX  Quality range (default: 65-90)
@@ -143,8 +145,11 @@ Options:
 Usage:
   justwebp [options] [file-or-folder ...]
 
-Default quality 82/method 5. Beside-source conversion removes a source only
-after a smaller WebP is installed. Animated PNG/WebP and multi-page TIFF are rejected.
+Default quality 82/method 5. With no output folder, the destination is
+<source-folder>/<name>.webp; an existing destination is replaced and the source
+is removed only after a smaller WebP is safely installed. --output writes
+<DIR>/<name>.webp and always keeps the source. Animated PNG/WebP and multi-page
+TIFF are rejected.
 
 Options:
   -q, --quality N        Quality, 0-100 (default: 82)
@@ -185,9 +190,11 @@ Options:
 Usage:
   justavif [options] [file-or-folder ...]
 
-Defaults: AV1 quality 60, speed 6, 4:2:0, stripped metadata. Beside-source
-conversion removes its source only if the AVIF is smaller. Transparent,
-animated, and multi-page inputs are rejected rather than losing information.
+Defaults: AV1 quality 60, speed 6, 4:2:0, stripped metadata. With no output
+folder, the destination is <source-folder>/<name>.avif; an existing destination
+is replaced and the source is removed only if the AVIF is smaller. --output
+writes <DIR>/<name>.avif and keeps the source. Transparent, animated, and
+multi-page inputs are rejected rather than losing information.
 
 Options:
   -q, --quality N        Visual quality, 0-100 (default: 60)
@@ -241,7 +248,11 @@ Options:
                 mode.default_jobs()
             )
         }
-    }
+    };
+    format!(
+        "{help}\n\nRun {} with no arguments to open the interactive launcher. Its Headless\nfooter shows the equivalent direct command; explicit arguments and pipes bypass the UI.",
+        mode.tool()
+    )
 }
 
 fn env_u32(name: &str, fallback: u32) -> u32 {

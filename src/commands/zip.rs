@@ -17,9 +17,11 @@ const HELP: &str = r#"justzip — Archive a Git working tree while honoring ever
 Usage:
   justzip [options] [folder]
 
-With no folder, archives the current folder. The default output is
+In direct/headless mode, `.` archives the current folder. The default output is
 <folder>.zip in the current directory. Git supplies the file list, so nested
 .gitignore files, .git/info/exclude, and global ignores all apply.
+
+Run bare to open the interactive launcher; explicit arguments bypass the UI.
 
 Options:
   -o, --output PATH       Output ZIP file, or an existing output directory

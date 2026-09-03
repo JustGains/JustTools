@@ -27,17 +27,25 @@ Options:
       --cpu          Alias for --provider cpu
       --gpu          Require the platform-default GPU provider; never use CPU
       --check        Check runtime and acceleration without downloading the model
+      --download     Install pinned managed runtime/model without a second prompt
       --model PATH   ONNX model path (or set RMBG_MODEL)
   -h, --help         Show this help
 
-Default output is <input>-nobg.png. Auto mode uses managed DirectML on Windows
-x64 when available and may use CPU for unsupported model nodes; if acceleration
-fails, it visibly falls back to CPU. Linux CUDA and macOS CoreML use a
-provider-enabled runtime supplied through ORT_DYLIB_PATH.
+Default output is <input>-nobg.png beside the input. Inputs are always kept;
+existing outputs are replaced atomically. For one input, --output is an exact
+file; for multiple inputs or one directory, it is an output directory. Auto
+mode uses managed DirectML on Windows x64 when available and may use CPU for
+unsupported model nodes; if acceleration fails, it visibly falls back to CPU.
+Linux CUDA and macOS CoreML use a provider-enabled runtime supplied through
+ORT_DYLIB_PATH.
 
-The model and managed runtimes are downloaded only after interactive
-confirmation, verified with pinned sizes and SHA-256 hashes, and cached per user.
-Noninteractive runs never download dependencies."#;
+The launcher enables --download visibly, so choosing Run installs a missing
+managed runtime/model automatically. Headless runs must pass --download or
+confirm interactively. Downloads use pinned sizes and SHA-256 hashes and are
+cached per user.
+
+Run bare to open the interactive launcher. Its Headless footer shows the
+equivalent direct command; explicit arguments bypass the UI."#;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Provider {
@@ -88,6 +96,7 @@ struct Options {
     provider: Provider,
     provider_explicit: bool,
     check: bool,
+    download: bool,
     model: Option<PathBuf>,
     help: bool,
 }
@@ -154,6 +163,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
         provider: Provider::Auto,
         provider_explicit: false,
         check: false,
+        download: false,
         model: None,
         help: false,
     };
@@ -193,6 +203,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
                 "--cpu" => set_provider(&mut options, Provider::Cpu, option)?,
                 "--gpu" => set_provider(&mut options, Provider::platform_gpu(), option)?,
                 "--check" => options.check = true,
+                "--download" => options.download = true,
                 _ if text.is_some_and(|value| value.starts_with('-')) => {
                     return Err(ToolError::usage(
                         TOOL,
@@ -236,7 +247,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     }
 
     if options.check {
-        let runtime = runtime::initialize(options.provider)?;
+        let runtime = runtime::initialize(options.provider, options.download)?;
         status(&format!(
             "Runtime: {} ({})",
             runtime.path.display(),
@@ -247,14 +258,28 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
 
     // Validate all cheap file mappings before offering any dependency download.
     let job_set = jobs::prepare(&options.inputs, options.output.as_deref())?;
+    for job in &job_set.jobs {
+        super::image_ops::assert_static(TOOL, &job.input)?;
+        status(&format!(
+            "Output: {} -> {}{}",
+            job.input.display(),
+            job.output.display(),
+            if job.output.exists() {
+                " (existing output will be replaced atomically)"
+            } else {
+                " (input will be kept)"
+            }
+        ));
+    }
     // Resolve the small native runtime before offering the ~780 MiB model download.
-    let runtime = runtime::initialize(options.provider)?;
+    let runtime = runtime::initialize(options.provider, options.download)?;
     status(&format!(
         "Runtime: {} ({})",
         runtime.path.display(),
         runtime.source
     ));
-    let model_path = model::resolve(options.model.as_deref())?;
+    let model_path = model::resolve(options.model.as_deref(), options.download)?;
+    status(&format!("Model: {}", model_path.display()));
     jobs::reject_model_overwrite(&job_set.jobs, &model_path)?;
 
     let load_started = Instant::now();
@@ -385,6 +410,12 @@ mod tests {
         let options = parse(vec!["--check".into()]).unwrap();
         assert!(options.check);
         assert!(options.inputs.is_empty());
+    }
+
+    #[test]
+    fn download_is_an_explicit_headless_permission() {
+        let options = parse(vec!["photo.jpg".into(), "--download".into()]).unwrap();
+        assert!(options.download);
     }
 
     #[test]

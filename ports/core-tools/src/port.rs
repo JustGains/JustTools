@@ -10,7 +10,7 @@ use sysinfo::{Pid, System};
 #[command(
     name = "justport",
     about = "Find what is using a local port.",
-    after_help = "Examples:\n  justport 3000 5000\n  justport --all\n  justport --kill 4321"
+    after_help = "Examples:\n  justport 3000 5000\n  justport --all\n  justport --kill 4321\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
 )]
 struct Cli {
     /// Stop owning user processes (system PIDs are protected).

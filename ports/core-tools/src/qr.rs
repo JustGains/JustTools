@@ -37,7 +37,7 @@ impl std::fmt::Display for ErrorLevel {
 #[command(
     name = "justqr",
     about = "Generate a ready-to-scan QR code.",
-    after_help = "Defaults: qr.png, 1024 px, error correction Q, four-module quiet zone,\nblack foreground, and white background. Multiple text arguments are joined with spaces."
+    after_help = "Defaults: qr.png, 1024 px, error correction Q, four-module quiet zone,\nblack foreground, and white background. Multiple text arguments are joined with spaces.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
 )]
 struct Cli {
     /// Output path (default: qr.png or qr.svg).

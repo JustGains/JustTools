@@ -5,7 +5,7 @@ use std::path::Path;
 use atomic_write_file::AtomicWriteFile;
 use image::codecs::png::{CompressionType, FilterType as PngFilterType, PngEncoder};
 use image::imageops::{self, FilterType};
-use image::{DynamicImage, GrayImage, ImageDecoder, ImageEncoder, ImageReader, RgbaImage};
+use image::{DynamicImage, GrayImage, ImageEncoder, RgbaImage};
 
 use crate::error::{ToolError, ToolResult};
 
@@ -21,7 +21,9 @@ pub struct PreparedImage {
 
 impl PreparedImage {
     pub fn load(path: &Path) -> ToolResult<Self> {
-        let original = load_oriented(path)?.to_rgba8();
+        let original = super::super::image_ops::load_oriented(path)
+            .map_err(|error| ToolError::new(TOOL, error))?
+            .to_rgba8();
         let resized = DynamicImage::ImageRgba8(original.clone())
             .resize_exact(MODEL_SIZE, MODEL_SIZE, FilterType::Lanczos3)
             .to_rgb8();
@@ -47,23 +49,6 @@ impl PreparedImage {
         }
         write_png_atomic(output, &rgba)
     }
-}
-
-fn load_oriented(path: &Path) -> ToolResult<DynamicImage> {
-    let reader = ImageReader::open(path)
-        .map_err(|error| ToolError::new(TOOL, format!("cannot open image: {error}")))?
-        .with_guessed_format()
-        .map_err(|error| ToolError::new(TOOL, format!("cannot detect image format: {error}")))?;
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|error| ToolError::new(TOOL, format!("unsupported or corrupt image: {error}")))?;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder)
-        .map_err(|error| ToolError::new(TOOL, format!("cannot decode image: {error}")))?;
-    image.apply_orientation(orientation);
-    Ok(image)
 }
 
 fn normalize_rgb(rgb: &[u8]) -> Vec<f32> {

@@ -8,16 +8,22 @@ commit without opening an editor.
 
 ## Quick start
 
+Run `justcommit` by itself to open the standardized settings launcher. Its
+bottom line shows the exact headless command and saved model, stage-scope,
+patch-sampling, timeout, and repair-agent choices. Repository paths and the
+one-run dry-run, push, and repair actions are not persisted. See the
+[console UI guide](console-ui.md) for keys and storage behavior.
+
 Set the key in the environment so it does not need to appear in shell history:
 
 ```powershell
 $env:OPENROUTER_API_KEY = "your-key"
-justcommit
+justcommit .
 ```
 
 ```sh
 export OPENROUTER_API_KEY="your-key"
-justcommit
+justcommit .
 ```
 
 The key may instead be supplied with `--api-key`. JustCommit does not print or
@@ -26,9 +32,9 @@ store it, include it in a repair brief, or write it to the repository.
 Useful modes:
 
 ```sh
-justcommit --dry-run
-justcommit --push
-justcommit --staged
+justcommit . --dry-run
+justcommit . --push
+justcommit . --staged
 justcommit -C ../another-repository
 justcommit --model google/gemini-3.1-flash-lite
 justcommit --no-patches

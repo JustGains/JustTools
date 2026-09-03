@@ -276,7 +276,7 @@ fn dml_cache_library() -> ToolResult<PathBuf> {
         .join("onnxruntime.dll"))
 }
 
-pub fn initialize(provider: Provider) -> ToolResult<RuntimeInfo> {
+pub fn initialize(provider: Provider, download_approved: bool) -> ToolResult<RuntimeInfo> {
     let requested = requested_providers(provider)?;
     if let Some(explicit) = env::var_os("ORT_DYLIB_PATH").filter(|value| !value.is_empty()) {
         let path = PathBuf::from(explicit);
@@ -298,9 +298,10 @@ pub fn initialize(provider: Provider) -> ToolResult<RuntimeInfo> {
     if wants_managed_directml(planned) {
         if provider == Provider::Auto
             && !validate_dml_cache(&dml_cache_library()?)?
+            && !download_approved
             && !is_interactive()
         {
-            let mut runtime = initialize_cpu_runtime()?;
+            let mut runtime = initialize_cpu_runtime(false)?;
             runtime.providers = vec![Provider::Cpu];
             runtime.auto_cpu_fallback = true;
             runtime.attempts.push(
@@ -309,7 +310,7 @@ pub fn initialize(provider: Provider) -> ToolResult<RuntimeInfo> {
             );
             return Ok(runtime);
         }
-        let mut runtime = initialize_managed_directml()?;
+        let mut runtime = initialize_managed_directml(download_approved)?;
         runtime.providers = vec![Provider::DirectMl];
         return Ok(runtime);
     }
@@ -322,7 +323,7 @@ pub fn initialize(provider: Provider) -> ToolResult<RuntimeInfo> {
         return Ok(runtime);
     }
 
-    let mut runtime = initialize_cpu_runtime()?;
+    let mut runtime = initialize_cpu_runtime(download_approved)?;
     runtime.providers = vec![Provider::Cpu];
     Ok(runtime)
 }
@@ -331,7 +332,7 @@ fn wants_managed_directml(provider: Provider) -> bool {
     cfg!(all(target_os = "windows", target_arch = "x86_64")) && provider == Provider::DirectMl
 }
 
-fn initialize_managed_directml() -> ToolResult<RuntimeInfo> {
+fn initialize_managed_directml(download_approved: bool) -> ToolResult<RuntimeInfo> {
     let cached = dml_cache_library()?;
     let mut errors = Vec::new();
     if validate_dml_cache(&cached)? {
@@ -346,7 +347,9 @@ fn initialize_managed_directml() -> ToolResult<RuntimeInfo> {
         ));
     }
 
-    confirm_dml_install(&cached)?;
+    if !download_approved {
+        confirm_dml_install(&cached)?;
+    }
     install_directml(&cached)?;
     load_runtime(cached.clone(), "managed DirectML cache").map_err(|error| {
         ToolError::new(
@@ -383,7 +386,7 @@ fn initialize_custom_provider_runtime(provider: Provider) -> ToolResult<RuntimeI
     ))
 }
 
-fn initialize_cpu_runtime() -> ToolResult<RuntimeInfo> {
+fn initialize_cpu_runtime(download_approved: bool) -> ToolResult<RuntimeInfo> {
     let asset = current_asset()?;
     let cached = cache_library(asset)?;
     let executable = env::current_exe().ok();
@@ -396,7 +399,9 @@ fn initialize_cpu_runtime() -> ToolResult<RuntimeInfo> {
         }
     }
 
-    confirm_install(asset, &cached)?;
+    if !download_approved {
+        confirm_install(asset, &cached)?;
+    }
     install_runtime(asset, &cached)?;
     load_runtime(cached.clone(), "managed CPU cache").map_err(|error| {
         ToolError::new(

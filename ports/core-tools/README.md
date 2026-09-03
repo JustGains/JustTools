@@ -13,6 +13,12 @@ The tiny `src/bin/just*.rs` targets exist only to give these engines direct CLI
 integration coverage. Release packaging builds `-p justtools`, so users receive
 one root executable and `just install` creates all command aliases.
 
+The root multicall binary owns the standardized bare-command console UI, saved
+defaults, and live Headless footer. Explicit arguments and piped input are
+forwarded to these engines unchanged. The direct test binaries in this crate do
+not implement the launcher because they are not packaged for users; see the
+[console UI contract](../../docs/console-ui.md).
+
 The crate has no runtime dependency on Node, PowerShell, or external codecs.
 Its focused test suite runs with:
 

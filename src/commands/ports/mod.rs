@@ -23,6 +23,7 @@ struct Options {
 }
 
 pub fn run(args: Vec<OsString>) -> ToolResult {
+    let bare = args.is_empty();
     let args = args
         .iter()
         .map(|argument| crate::common::os_to_string(TOOL, argument, "argument"))
@@ -38,8 +39,17 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         println!("{TOOL} {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let options = parse(&args)?;
-    run_with(options).map_err(|error| ToolError::new(TOOL, format!("{error:#}")))
+    let mut options = parse(&args)?;
+    let preferences = if bare {
+        let preferences = crate::preferences::Store::load().map_err(|error| {
+            ToolError::new(TOOL, format!("could not load saved defaults: {error:#}"))
+        })?;
+        options.all = preferences.get(TOOL, "show_all") == Some("true");
+        Some(preferences)
+    } else {
+        None
+    };
+    run_with(options, preferences).map_err(|error| ToolError::new(TOOL, format!("{error:#}")))
 }
 
 fn parse(args: &[String]) -> ToolResult<Options> {
@@ -96,7 +106,7 @@ fn parse(args: &[String]) -> ToolResult<Options> {
     Ok(options)
 }
 
-fn run_with(options: Options) -> Result<()> {
+fn run_with(options: Options, preferences: Option<crate::preferences::Store>) -> Result<()> {
     if options.history_path {
         println!("{}", cache::cache_path()?.display());
         return Ok(());
@@ -130,7 +140,8 @@ fn run_with(options: Options) -> Result<()> {
     }
 
     let scanner = ServerScanner::new();
-    let mut app = App::new(scanner, options.all)?;
+    let preferences = preferences.unwrap_or(crate::preferences::Store::load()?);
+    let mut app = App::new(scanner, options.all, preferences)?;
     ratatui::run(|terminal| app.run(terminal)).context("terminal UI failed")?;
     Ok(())
 }

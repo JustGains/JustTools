@@ -4,6 +4,11 @@
 
 It is deliberately optimized for the common path: launch it, press `e` on anything that should survive future cleanups, then press `K` whenever you want to stop everything else.
 
+The bottom line always shows `justbunt --snapshot`, the read-only headless form
+of the process inventory. bunt's workload protection rules and behavior remain
+in its dedicated configuration; shared launcher defaults are documented in the
+[console UI guide](console-ui.md).
+
 ## Install and run with JustTools
 
 ```powershell
@@ -84,7 +89,11 @@ Run this to locate the file:
 bunt --config-path
 ```
 
-The TOML file is only created after the first exclusion is saved. It is human-editable. `bunt` creates workload-scoped rules automatically, but broader rules can be written directly:
+The TOML file is created after the first exclusion or display-default change and
+is written atomically. The `Tab` view, `1`-`4` runtime filter, and `s` sort order
+are saved immediately and restored on the next launch. The file is
+human-editable. `bunt` creates workload-scoped rules automatically, but broader
+rules can be written directly:
 
 ```toml
 version = 1
@@ -93,6 +102,9 @@ version = 1
 refresh_ms = 900
 grace_period_ms = 1200
 confirm_kill_all = true
+view_filter = "all"
+runtime_filter = "all"
+sort_key = "name"
 
 [[excludes]]
 id = "keep-project"

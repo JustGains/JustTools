@@ -88,6 +88,22 @@ impl ViewFilter {
             Self::Protected => "protected",
         }
     }
+
+    fn config_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Targets => "targets",
+            Self::Protected => "protected",
+        }
+    }
+
+    fn from_config(value: &str) -> Self {
+        match value {
+            "targets" => Self::Targets,
+            "protected" => Self::Protected,
+            _ => Self::All,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,6 +117,24 @@ impl RuntimeFilter {
         match self {
             Self::All => "all runtimes",
             Self::One(runtime) => runtime.as_str(),
+        }
+    }
+
+    fn config_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::One(Runtime::Node) => "node",
+            Self::One(Runtime::Bun) => "bun",
+            Self::One(Runtime::Python) => "python",
+        }
+    }
+
+    fn from_config(value: &str) -> Self {
+        match value {
+            "node" => Self::One(Runtime::Node),
+            "bun" => Self::One(Runtime::Bun),
+            "python" => Self::One(Runtime::Python),
+            _ => Self::All,
         }
     }
 }
@@ -129,6 +163,24 @@ impl SortKey {
             Self::Memory => "memory↓",
             Self::Age => "age↓",
             Self::Name => "name↑",
+        }
+    }
+
+    fn config_value(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Memory => "memory",
+            Self::Age => "age",
+            Self::Name => "name",
+        }
+    }
+
+    fn from_config(value: &str) -> Self {
+        match value {
+            "cpu" => Self::Cpu,
+            "memory" => Self::Memory,
+            "age" => Self::Age,
+            _ => Self::Name,
         }
     }
 }
@@ -254,15 +306,19 @@ pub struct App {
 impl App {
     pub fn new(mut scanner: ProcessScanner, store: ConfigStore) -> Self {
         let scan = scanner.scan();
+        let behavior = &store.config().behavior;
+        let view_filter = ViewFilter::from_config(&behavior.view_filter);
+        let runtime_filter = RuntimeFilter::from_config(&behavior.runtime_filter);
+        let sort_key = SortKey::from_config(&behavior.sort_key);
         Self {
             scanner,
             store,
             processes: scan.processes,
             launcher_ancestry: scan.launcher_ancestry,
             selected: 0,
-            view_filter: ViewFilter::All,
-            runtime_filter: RuntimeFilter::All,
-            sort_key: SortKey::Name,
+            view_filter,
+            runtime_filter,
+            sort_key,
             query: String::new(),
             mode: Mode::Normal,
             pending_kill: None,
@@ -495,10 +551,12 @@ impl App {
             KeyCode::Tab => {
                 self.view_filter = self.view_filter.next();
                 self.reset_selection();
+                self.save_display_defaults();
             }
             KeyCode::BackTab => {
                 self.view_filter = self.view_filter.previous();
                 self.reset_selection();
+                self.save_display_defaults();
             }
             KeyCode::Char('1') => self.set_runtime_filter(RuntimeFilter::All),
             KeyCode::Char('2') => self.set_runtime_filter(RuntimeFilter::One(Runtime::Node)),
@@ -507,6 +565,7 @@ impl App {
             KeyCode::Char('s') => {
                 self.sort_key = self.sort_key.next();
                 self.reset_selection();
+                self.save_display_defaults();
             }
             KeyCode::Char('r') => {
                 self.refresh_now();
@@ -567,6 +626,18 @@ impl App {
     fn set_runtime_filter(&mut self, filter: RuntimeFilter) {
         self.runtime_filter = filter;
         self.reset_selection();
+        self.save_display_defaults();
+    }
+
+    fn save_display_defaults(&mut self) {
+        match self.store.set_display_defaults(
+            self.view_filter.config_value(),
+            self.runtime_filter.config_value(),
+            self.sort_key.config_value(),
+        ) {
+            Ok(()) => self.set_status("View, runtime, and sort defaults saved"),
+            Err(error) => self.set_status(format!("Could not save display defaults: {error}")),
+        }
     }
 
     fn reset_selection(&mut self) {
@@ -1087,6 +1158,22 @@ mod tests {
         app.processes[0].cpu_percent = 1.2;
         app.processes[1].cpu_percent = 1.9;
         assert_eq!(app.visible_indices(), vec![1, 0]);
+    }
+
+    #[test]
+    fn display_changes_save_and_restore_as_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let store = ConfigStore::load_from(path.clone()).unwrap();
+        let mut app = App::new(ProcessScanner::new(), store);
+        app.handle_normal_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        app.handle_normal_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+
+        let restored = App::new(ProcessScanner::new(), ConfigStore::load_from(path).unwrap());
+        assert_eq!(restored.view_filter, ViewFilter::Targets);
+        assert_eq!(restored.runtime_filter, RuntimeFilter::One(Runtime::Bun));
+        assert_eq!(restored.sort_key, SortKey::Cpu);
     }
 
     #[test]

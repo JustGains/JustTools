@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[command(
     name = "justjson",
     about = "Format, validate, query, or minify JSON.",
-    after_help = "Files are formatted in place with two spaces and a final newline.\nPiped JSON is formatted to stdout. Object key order is preserved unless --sort is explicit."
+    after_help = "Files are formatted in place with two spaces and a final newline.\nPiped JSON is formatted to stdout. Object key order is preserved unless --sort is explicit.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
 )]
 pub struct Cli {
     /// Validate only; never write files.

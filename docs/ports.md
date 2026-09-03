@@ -3,6 +3,13 @@
 JustPorts is a live terminal dashboard for local development servers. Run
 `justports` or `just ports` to open it.
 
+Its last line shows the equivalent read-only headless command:
+`justports --snapshot` in the development view or
+`justports --snapshot --all` in the all-listeners view. Pressing `a` changes
+the view and immediately saves that choice as the next bare-run default. Toggle
+back to restore the development-only default; the shared file is described in
+the [console UI guide](console-ui.md).
+
 ## What it discovers
 
 Every refresh combines the operating system's listening TCP sockets with the
