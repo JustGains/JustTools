@@ -54,7 +54,8 @@ impl PreparedImage {
 fn normalize_rgb(rgb: &[u8]) -> Vec<f32> {
     let pixels = rgb.len() / 3;
     let mut chw = vec![0.0; pixels * 3];
-    for (index, pixel) in rgb.chunks_exact(3).enumerate() {
+    let (pixel_chunks, _) = rgb.as_chunks::<3>();
+    for (index, pixel) in pixel_chunks.iter().enumerate() {
         chw[index] = (f32::from(pixel[0]) / 255.0 - MEAN[0]) / STD[0];
         chw[pixels + index] = (f32::from(pixel[1]) / 255.0 - MEAN[1]) / STD[1];
         chw[pixels * 2 + index] = (f32::from(pixel[2]) / 255.0 - MEAN[2]) / STD[2];
