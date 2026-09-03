@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">JustOptimize console UI</title>
+  <desc id="desc">The standardized JustOptimize launcher showing saved settings, output, overwrite policy, and headless command.</desc>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#111827"/><stop offset="1" stop-color="#241129"/></linearGradient></defs>
+  <rect width="1200" height="720" rx="24" fill="url(#bg)"/><rect x="34" y="34" width="1132" height="652" rx="16" fill="#101017" stroke="#5e536c" stroke-width="2"/>
+  <g font-family="Cascadia Mono, Consolas, monospace" font-size="21" fill="#e9e3ee">
+    <text x="66" y="78" font-size="20" font-weight="700" fill="#ffffff">┌ JustOptimize ───────────────────────────────────────────────────────────┐</text>
+    <text x="66" y="112" fill="#9be8cb">│ Choose the smallest web-ready image format   saved defaults: automatic │</text>
+    <text x="66" y="150" font-size="20" font-weight="700" fill="#ffffff">├ Configuration ─────────────────────────────────────────────────────────┤</text>
+    <text x="82" y="188" fill="#9e93ad">Setting                  Value                              Scope</text>
+    <rect x="68" y="205" width="1064" height="39" rx="6" fill="#312342"/>
+    <text x="82" y="233" fill="#d5b5ff">› Input files / folders</text><text x="390" y="233">.  (current folder)</text><text x="1010" y="233" fill="#9e93ad">this run</text>
+    <text x="82" y="279">  Web quality</text><text x="390" y="279" fill="#9be8cb">82</text><text x="1010" y="279" fill="#9e93ad">saved</text>
+    <text x="82" y="321">  Replace sources</text><text x="390" y="321" fill="#9be8cb">Off</text><text x="1010" y="321" fill="#9e93ad">saved</text>
+    <text x="82" y="363">  Output folder</text><text x="390" y="363" fill="#9be8cb">&lt;not set&gt;</text><text x="1010" y="363" fill="#9e93ad">saved</text>
+    <text x="82" y="405">  Parallel jobs</text><text x="390" y="405" fill="#9be8cb">4</text><text x="1010" y="405" fill="#9e93ad">saved</text>
+    <text x="82" y="447">  Recursive</text><text x="390" y="447" fill="#9be8cb">Off</text><text x="1010" y="447" fill="#9e93ad">saved</text>
+    <text x="66" y="493" font-size="20" font-weight="700" fill="#ffffff">├ Details and outcome ───────────────────────────────────────────────────┤</text>
+    <text x="82" y="529">Use semicolons between inputs. Blank evaluates the current folder.</text>
+    <text x="82" y="563" fill="#9be8cb">Output: beside each source as &lt;name&gt;-optimized.&lt;best&gt;</text>
+    <text x="82" y="597" fill="#e5b8ff">Overwrite: source kept; existing destinations require confirmation.</text>
+    <text x="82" y="639" fill="#9e93ad">↑↓ move  ←→/Space change  Enter edit/run  D reset  ? help  q quit</text>
+    <text x="82" y="674" fill="#d5b5ff">Headless: justoptimize .</text>
+  </g>
+</svg>

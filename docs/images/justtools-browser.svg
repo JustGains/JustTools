@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">JustTools command browser</title>
+  <desc id="desc">The JustTools console browser showing native tools and their purposes.</desc>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#160d22"/><stop offset="1" stop-color="#28111d"/></linearGradient></defs>
+  <rect width="1200" height="720" rx="24" fill="url(#bg)"/><rect x="34" y="34" width="1132" height="652" rx="16" fill="#111018" stroke="#5e536c" stroke-width="2"/>
+  <g font-family="Cascadia Mono, Consolas, monospace" font-size="22" fill="#e9e3ee">
+    <text x="66" y="79" font-size="20" font-weight="700" fill="#ffffff">┌ JustTools ───────────────────────────────────────────────────────────────┐</text>
+    <text x="66" y="113" fill="#9be8cb">│ 22 tools   one binary · native aliases · saved defaults                 │</text>
+    <text x="66" y="147" font-size="20" font-weight="700" fill="#ffffff">├ Choose a tool ──────────────────────────────────────────────────────────┤</text>
+    <text x="80" y="187" fill="#9e93ad">Tool             Purpose</text>
+    <text x="80" y="229" fill="#d5b5ff">› justaudio</text><text x="310" y="229">convert audio or video to compact AAC/M4A</text>
+    <text x="80" y="271">  justavif</text><text x="310" y="271">convert still images to compact AVIF</text>
+    <text x="80" y="313">  justbunt</text><text x="310" y="313">find, protect, and stop development processes</text>
+    <text x="80" y="355">  justcommit</text><text x="310" y="355">stage, summarize, commit, and optionally push</text>
+    <text x="80" y="397">  justcrop</text><text x="310" y="397">trim transparent borders to alpha bounds</text>
+    <text x="80" y="439">  justjpg</text><text x="310" y="439">create optimized progressive JPEG files</text>
+    <text x="80" y="481">  justjson</text><text x="310" y="481">format, validate, query, or minify JSON</text>
+    <text x="80" y="523">  justmp3</text><text x="310" y="523">convert soundtracks to high-quality MP3</text>
+    <text x="80" y="565" fill="#9be8cb">  justoptimize</text><text x="310" y="565">choose the smallest safe PNG, WebP, or JPEG</text>
+    <text x="66" y="611" font-size="20" font-weight="700" fill="#ffffff">├ Details ────────────────────────────────────────────────────────────────┤</text>
+    <text x="80" y="649" fill="#9e93ad">↑↓/jk move   Enter open   ? help   q quit</text><text x="80" y="677" fill="#d5b5ff">Command: just audio</text>
+  </g>
+</svg>

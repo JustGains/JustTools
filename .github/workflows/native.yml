@@ -46,6 +46,7 @@ jobs:
             artifact: justtools-windows-x64
             executable: just.exe
             archive: zip
+            ort_version: 1.24.3
             ort_archive: onnxruntime-win-x64-1.24.3.zip
             ort_sha256: 4fbfb85d0e9de9bb6fb8a9866a7cb477cbad404d889b236931bf3f5d547e5f48
             ort_library: onnxruntime.dll
@@ -54,6 +55,7 @@ jobs:
             artifact: justtools-windows-arm64
             executable: just.exe
             archive: zip
+            ort_version: 1.24.3
             ort_archive: onnxruntime-win-arm64-1.24.3.zip
             ort_sha256: 0b9ee92bcd1f82f684b574cb413f27595e0d2f7b96ec6d02b30301f45ad313b0
             ort_library: onnxruntime.dll
@@ -62,6 +64,7 @@ jobs:
             artifact: justtools-linux-x64
             executable: just
             archive: tar.gz
+            ort_version: 1.24.3
             ort_archive: onnxruntime-linux-x64-1.24.3.tgz
             ort_sha256: 4c436a280d650f8bf32c921a2bf4de7c42cc32884c51c90e47de991708bbb5a4
             ort_library: libonnxruntime.so
@@ -70,6 +73,7 @@ jobs:
             artifact: justtools-linux-arm64
             executable: just
             archive: tar.gz
+            ort_version: 1.24.3
             ort_archive: onnxruntime-linux-aarch64-1.24.3.tgz
             ort_sha256: 15100fb88b4c692cdd6bf2cca5f4a26a3806cebca8136de6681e2aba4b2ea033
             ort_library: libonnxruntime.so
@@ -78,6 +82,7 @@ jobs:
             artifact: justtools-macos-arm64
             executable: just
             archive: tar.gz
+            ort_version: 1.24.3
             ort_archive: onnxruntime-osx-arm64-1.24.3.tgz
             ort_sha256: c255663d40755f84b1b86373bdb9870bb65f3a2c3d779b3d7ae31aaa00cebb4f
             ort_library: libonnxruntime.dylib
@@ -86,8 +91,9 @@ jobs:
             artifact: justtools-macos-x64
             executable: just
             archive: tar.gz
-            ort_archive: onnxruntime-osx-x86_64-1.22.0.tgz
-            ort_sha256: e4ec94a7696de74fb1b12846569aa94e499958af6ffa186022cfde16c9d617f0
+            ort_version: 1.23.2
+            ort_archive: onnxruntime-osx-x86_64-1.23.2.tgz
+            ort_sha256: d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6
             ort_library: libonnxruntime.dylib
 
     runs-on: ${{ matrix.os }}
@@ -111,10 +117,7 @@ jobs:
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP "${{ matrix.ort_archive }}"
-          $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.3/${{ matrix.ort_archive }}"
-          if ("${{ matrix.ort_archive }}" -like "*1.22.0*") {
-            $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/${{ matrix.ort_archive }}"
-          }
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v${{ matrix.ort_version }}/${{ matrix.ort_archive }}"
           Invoke-WebRequest -Uri $url -OutFile $archive
           $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne "${{ matrix.ort_sha256 }}") {
@@ -164,7 +167,8 @@ jobs:
           $stage = "dist/${{ matrix.artifact }}"
           $archive = "dist/${{ matrix.artifact }}.zip"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target/release/${{ matrix.executable }}", README.md, LICENSE, THIRD_PARTY_LICENSES.md -Destination $stage
+          Copy-Item "target/release/${{ matrix.executable }}", README.md, AGENTS.md, LICENSE, THIRD_PARTY_LICENSES.md -Destination $stage
+          Copy-Item docs, skills -Destination $stage -Recurse
           Compress-Archive -Path "$stage/*" -DestinationPath $archive
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $([IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath "$archive.sha256" -Encoding ascii
@@ -177,7 +181,8 @@ jobs:
           archive="dist/${{ matrix.artifact }}.tar.gz"
           mkdir -p "$stage"
           install -m 0755 "target/release/${{ matrix.executable }}" "$stage/just"
-          install -m 0644 README.md LICENSE THIRD_PARTY_LICENSES.md "$stage/"
+          install -m 0644 README.md AGENTS.md LICENSE THIRD_PARTY_LICENSES.md "$stage/"
+          cp -R docs skills "$stage/"
           tar -czf "$archive" -C "$stage" .
           if command -v sha256sum >/dev/null 2>&1; then
             hash="$(sha256sum "$archive" | awk '{ print $1 }')"
