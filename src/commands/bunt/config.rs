@@ -268,7 +268,11 @@ mod tests {
         WorkloadIdentity {
             runtime: Runtime::Bun,
             executable: Some("c:/tools/bun.exe".into()),
-            anchor: Some("f:/project".into()),
+            anchor: Some(if cfg!(windows) {
+                "f:/project".into()
+            } else {
+                "/srv/project".into()
+            }),
             workload: "command:run:dev".into(),
         }
     }
@@ -280,7 +284,11 @@ mod tests {
             name: "dev".into(),
             scope: RuleScope::Workload,
             runtime: Some(Runtime::Bun),
-            project: Some("F:\\PROJECT\\".into()),
+            project: Some(if cfg!(windows) {
+                "F:\\PROJECT\\".into()
+            } else {
+                "/srv/project/".into()
+            }),
             workload: Some("command:run:dev".into()),
             executable: None,
             created_at: 0,

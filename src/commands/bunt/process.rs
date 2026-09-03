@@ -602,10 +602,13 @@ fn normalize_script(value: &str, cwd: Option<&Path>, anchor: Option<&Path>) -> (
     if let Some(index) = normalized.find("node_modules/") {
         return (normalized[index..].to_owned(), false);
     }
-    if normalized.contains("/uv/cache/")
-        && let Some(index) = normalized.rfind("/scripts/")
-    {
-        return (format!("uv-tool/{}", &normalized[index + 9..]), false);
+    if normalized.contains("/uv/cache/") || normalized.contains("/.cache/uv/") {
+        if let Some(index) = normalized.rfind("/scripts/") {
+            return (format!("uv-tool/{}", &normalized[index + 9..]), false);
+        }
+        if let Some(index) = normalized.rfind("/bin/") {
+            return (format!("uv-tool/{}", &normalized[index + 5..]), false);
+        }
     }
     (normalized, false)
 }
@@ -694,8 +697,13 @@ mod tests {
 
     #[test]
     fn runtime_classifier_is_strict_but_handles_versions() {
+        let node = if cfg!(windows) {
+            "C:\\Program Files\\nodejs\\node.exe"
+        } else {
+            "/usr/local/bin/node"
+        };
         assert_eq!(
-            classify_runtime_token(OsStr::new("C:\\Program Files\\nodejs\\node.exe")),
+            classify_runtime_token(OsStr::new(node)),
             Some(Runtime::Node)
         );
         assert_eq!(
@@ -734,11 +742,17 @@ mod tests {
 
     #[test]
     fn node_entrypoint_becomes_project_relative() {
-        let command = vec![
-            "node".into(),
-            "F:\\site\\node_modules\\vite\\bin\\vite.js".into(),
-        ];
-        let root = Path::new("F:\\site");
+        let entrypoint = if cfg!(windows) {
+            "F:\\site\\node_modules\\vite\\bin\\vite.js"
+        } else {
+            "/srv/site/node_modules/vite/bin/vite.js"
+        };
+        let command = vec!["node".into(), entrypoint.into()];
+        let root = if cfg!(windows) {
+            Path::new("F:\\site")
+        } else {
+            Path::new("/srv/site")
+        };
         let (key, label, anchored) =
             derive_workload(Runtime::Node, &command, Some(root), Some(root));
         assert_eq!(key, "script:node_modules/vite/bin/vite.js");
@@ -748,11 +762,17 @@ mod tests {
 
     #[test]
     fn global_node_tool_does_not_inherit_the_callers_project() {
-        let command = vec![
-            "node".into(),
-            "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\tool\\cli.js".into(),
-        ];
-        let root = Path::new("F:\\unrelated-project");
+        let entrypoint = if cfg!(windows) {
+            "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\tool\\cli.js"
+        } else {
+            "/home/me/.npm-global/lib/node_modules/tool/cli.js"
+        };
+        let command = vec!["node".into(), entrypoint.into()];
+        let root = if cfg!(windows) {
+            Path::new("F:\\unrelated-project")
+        } else {
+            Path::new("/srv/unrelated-project")
+        };
         let (key, _, anchored) = derive_workload(Runtime::Node, &command, Some(root), Some(root));
         assert_eq!(key, "script:node_modules/tool/cli.js");
         assert!(!anchored);
@@ -760,13 +780,19 @@ mod tests {
 
     #[test]
     fn uv_cache_hash_is_removed_from_python_tool_identity() {
-        let command = vec![
-            "python".into(),
+        let entrypoint = if cfg!(windows) {
             "C:\\Users\\me\\AppData\\Local\\uv\\cache\\archive-v0\\abc123\\Scripts\\android-mcp.exe"
-                .into(),
-        ];
+        } else {
+            "/home/me/.cache/uv/archive-v0/abc123/bin/android-mcp"
+        };
+        let command = vec!["python".into(), entrypoint.into()];
         let (key, _, anchored) = derive_workload(Runtime::Python, &command, None, None);
-        assert_eq!(key, "script:uv-tool/android-mcp.exe");
+        let expected = if cfg!(windows) {
+            "script:uv-tool/android-mcp.exe"
+        } else {
+            "script:uv-tool/android-mcp"
+        };
+        assert_eq!(key, expected);
         assert!(!anchored);
     }
 
