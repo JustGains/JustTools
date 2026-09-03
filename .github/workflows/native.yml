@@ -144,6 +144,7 @@ jobs:
       - name: Check release RMBG CPU inference
         shell: pwsh
         run: |
+          $env:ORT_DYLIB_PATH = $env:JUSTTOOLS_TEST_ORT_DYLIB_PATH
           $output = & "target/release/${{ matrix.executable }}" rmbg --check --provider cpu 2>&1 | Out-String
           if ($LASTEXITCODE -ne 0) { throw $output }
           foreach ($expected in @(
