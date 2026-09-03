@@ -171,7 +171,8 @@ jobs:
           Copy-Item docs, skills -Destination $stage -Recurse
           Compress-Archive -Path "$stage/*" -DestinationPath $archive
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $([IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath "$archive.sha256" -Encoding ascii
+          $checksum = "$hash  $([IO.Path]::GetFileName($archive))`n"
+          [IO.File]::WriteAllText("$archive.sha256", $checksum, [Text.Encoding]::ASCII)
 
       - name: Package Unix artifact with executable mode
         if: matrix.archive == 'tar.gz'
