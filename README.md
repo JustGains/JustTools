@@ -47,12 +47,23 @@ and one-run actions never persist. The bottom line always shows the exact
 | --- | --- |
 | Images | `justoptimize`, `justcrop`, `justjpg`, `justpng`, `justwebp`, `justavif`, `justresize`, `justrmbg` |
 | Audio and video | `justaudio`, `justmp3`, `justwav`, `justvideo` |
-| Documents and data | `justjson`, `justpdf`, `justsvg`, `justqr` |
+| Documents and data | `justjson`, `justpdf`, `justlinks`, `justsvg`, `justqr` |
 | Development | `justports`, `justport`, `bunt`, `justcommit`, `justzip` |
 | Setup | `justready` |
+| Shell helpers | `mkcd`, `claude_`, `codex_` (automatic in Windows PowerShell) |
 
 Use `<command> --help` for every option. Direct aliases also work as short
 dispatch, such as `just optimize`, `just ports`, and `just rmbg`.
+
+Windows installations include PowerShell launchers: use `mkcd`, `claude_`, and
+`codex_` directly, with no `init` command or profile edit. On macOS/Linux, enable
+helpers in Bash/Zsh with
+`eval "$(just init bash)"` / `eval "$(just init zsh)"`, or in Fish with
+`just init fish | source`. Add that line to your shell profile to keep it.
+`mkcd my-folder` creates and enters one directory; `mkcd -p parent/child`
+also creates missing parents. `claude_` runs `claude --dangerously-skip-permissions`
+and `codex_` runs `codex --yolo`, forwarding additional arguments.
+See the [shell helpers guide](docs/mkcd.md).
 
 ## Safe image output
 
@@ -76,8 +87,15 @@ permission with `--download`; `justrmbg --check` tests the runtime first without
 downloading the model. BRIA's model weights require a separate license for
 commercial use.
 
+`justpdf images guide.pdf` saves every embedded image, copying JPEGs unchanged
+and keeping transparency as PNG. `justlinks guide.pdf plan.xlsx --csv` writes
+every unique link from PDFs, Office, and text files with its title, file, and
+location; add `--recursive` for folders. Matching ignores casing; YouTube watch,
+short, Shorts, live, and embed URLs merge into one clean video link without
+timestamps, tracking, or playlist parameters.
+
 For complete behavior, see the [console UI](docs/console-ui.md),
-[JustPorts](docs/ports.md), [bunt](docs/bunt.md),
+[JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustPorts](docs/ports.md), [bunt](docs/bunt.md),
 [JustCommit](docs/commit.md), and [JustReady](docs/ready.md) guides.
 
 ## Agent skill

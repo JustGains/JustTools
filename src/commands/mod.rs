@@ -11,7 +11,9 @@ pub mod crop;
 mod image_ops;
 pub mod jpg;
 pub mod json;
+pub mod links;
 mod media;
+pub mod mkcd;
 pub mod optimize;
 pub mod pdf;
 pub mod png;
@@ -62,6 +64,14 @@ pub const COMMANDS: &[CommandInfo] = &[
         description: "format, validate, query, or minify JSON",
     },
     CommandInfo {
+        name: "justlinks",
+        description: "extract every unique link, with titles, from PDFs, Office files, and text",
+    },
+    CommandInfo {
+        name: "justmkcd",
+        description: "create a directory and enter it with shell integration",
+    },
+    CommandInfo {
         name: "justmp3",
         description: "convert audio or video soundtracks to high-quality MP3",
     },
@@ -71,7 +81,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "justpdf",
-        description: "inspect, merge, split, extract, or rotate PDFs",
+        description: "inspect, merge, split, extract, or rotate PDFs, or save their images and links",
     },
     CommandInfo {
         name: "justpng",
@@ -152,11 +162,13 @@ fn dispatch_headless(command: &str, args: Vec<OsString>) -> ToolResult {
         "justcommit" => commit::run(args),
         "justcrop" => crop::run(args),
         "justjpg" => jpg::run(args),
+        "justmkcd" => mkcd::run(args),
         "justpng" => png::run(args),
         "justvideo" => video::run(args),
         "justwebp" => webp::run(args),
         "justzip" => zip::run(args),
         "justjson" => json::run(args),
+        "justlinks" => links::run(args),
         "justpdf" => pdf::run(args),
         "justport" => port::run(args),
         "justports" => ports::run(args),

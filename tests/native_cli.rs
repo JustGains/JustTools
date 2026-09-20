@@ -13,6 +13,8 @@ const COMMANDS: &[&str] = &[
     "justcrop",
     "justjpg",
     "justjson",
+    "justlinks",
+    "justmkcd",
     "justmp3",
     "justoptimize",
     "justpdf",
@@ -36,6 +38,27 @@ fn binary() -> PathBuf {
 
 fn run(args: &[&str]) -> Output {
     Command::new(binary()).args(args).output().unwrap()
+}
+
+#[test]
+fn links_dispatch_normalizes_youtube_and_casing() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("links-source.txt");
+    fs::write(&source, "HTTPS://EXAMPLE.TEST/Path\nhttps://example.test/path\nhttps://youtu.be/AbC_dEf-123?si=share\nhttps://youtube.com/live/abc_def-123?t=30\n").unwrap();
+    let output = Command::new(binary())
+        .args(["links", "-o", "-"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "HTTPS://EXAMPLE.TEST/Path\nhttps://www.youtube.com/watch?v=AbC_dEf-123\n"
+    );
 }
 
 fn executable_name(name: &str) -> String {
@@ -167,7 +190,11 @@ fn install_creates_native_aliases_and_backs_up_legacy_scripts() {
         String::from_utf8_lossy(&result.stderr)
     );
 
-    for command in COMMANDS.iter().copied().chain(["bunt", "just", "rmbg"]) {
+    for command in COMMANDS
+        .iter()
+        .copied()
+        .chain(["bunt", "just", "mkcd", "rmbg"])
+    {
         assert!(
             bin.join(executable_name(command)).is_file(),
             "missing installed alias {command}"

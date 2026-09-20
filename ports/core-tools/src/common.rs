@@ -87,10 +87,36 @@ pub fn collect_files(
     recursive: bool,
     excluded_directory: Option<&Path>,
 ) -> Result<CollectedFiles> {
+    let extension = extension.trim_start_matches('.');
+    collect(
+        raw_inputs,
+        recursive,
+        excluded_directory,
+        Some(extension),
+        &|path| has_extension(path, extension),
+    )
+}
+
+/// Accepts every explicitly named file; folder entries are kept when
+/// `include` accepts them.
+pub fn collect_inputs(
+    raw_inputs: &[PathBuf],
+    recursive: bool,
+    include: &dyn Fn(&Path) -> bool,
+) -> Result<CollectedFiles> {
+    collect(raw_inputs, recursive, None, None, include)
+}
+
+fn collect(
+    raw_inputs: &[PathBuf],
+    recursive: bool,
+    excluded_directory: Option<&Path>,
+    required_extension: Option<&str>,
+    include: &dyn Fn(&Path) -> bool,
+) -> Result<CollectedFiles> {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let mut used_directory = false;
-    let extension = extension.trim_start_matches('.');
     let excluded = excluded_directory.map(absolute_lexical).transpose()?;
 
     for raw in raw_inputs {
@@ -100,10 +126,11 @@ pub fn collect_files(
             continue;
         }
         if input.is_file() {
-            if has_extension(&input, extension) {
-                files.push(input);
-            } else {
-                warnings.push(format!("{}: not a .{extension} file", display_path(&input)));
+            match required_extension {
+                Some(extension) if !has_extension(&input, extension) => {
+                    warnings.push(format!("{}: not a .{extension} file", display_path(&input)));
+                }
+                _ => files.push(input),
             }
             continue;
         }
@@ -135,7 +162,7 @@ pub fn collect_files(
             {
                 continue;
             }
-            if entry.file_type().is_file() && has_extension(entry.path(), extension) {
+            if entry.file_type().is_file() && include(entry.path()) {
                 if excluded
                     .as_ref()
                     .is_some_and(|path| is_within(entry.path(), path))

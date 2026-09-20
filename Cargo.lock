@@ -1695,12 +1695,14 @@ dependencies = [
  "parcel_selectors",
  "predicates",
  "qrcode",
+ "roxmltree",
  "serde",
  "serde_json",
  "sysinfo",
  "tempfile",
  "walkdir",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]

@@ -20,13 +20,17 @@
 | Choose the best web image | `justoptimize` | Measure PNG/WebP/JPEG; preserve alpha; keep source |
 | Create WAV | `justwav` | Stereo 16-bit PCM, 48 kHz |
 | Work with JSON | `justjson` | Format, validate, query, or minify |
-| Work with PDF | `justpdf` | Inspect, merge, split, extract, or rotate |
+| Work with PDF | `justpdf` | Inspect, merge, split, extract, rotate, save images, or list unique links |
+| Extract links | `justlinks` | Unique links from PDF, Office, and text files to `links.txt`; `--csv` adds title, file, location, and count |
 | Optimize SVG | `justsvg` | Conservative SVGOMG-style OXVG optimization |
 | Generate QR | `justqr` | 1024 px PNG, error correction Q, four-module margin |
 | Inspect ports | `justport` | Show listener/process ownership; guarded kill is optional |
 | Browse development servers | `justports` | Live smart TUI, automatic saving, and one-key Launch Again recipes |
 | Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to `<name>-nobg.png`; Auto visibly falls back to CPU |
 | Archive a repository | `justzip` | ZIP Git's tracked and unignored file set |
+| Create and enter a directory | `justmkcd` / `mkcd` | Create one directory; enter it through `just init` shell integration |
+| Claude permission-bypass shortcut | `claude_` | Shell function for `claude --dangerously-skip-permissions`, forwarding arguments |
+| Codex permission-bypass shortcut | `codex_` | Shell function for `codex --yolo`, forwarding arguments |
 
 Every direct alias also works through short dispatch: `just resize`, `just pdf`,
 `just rmbg`, and so on.
@@ -37,6 +41,32 @@ bypasses, and one-run action/safety switches do not. The bottom line shows the
 exact headless command. Supplying any explicit argument or piping stdin bypasses
 the UI. `just --defaults-path` prints the shared defaults file; `D` resets the
 current tool's saved overrides.
+
+## Shell helpers
+
+Windows installations include automatic PowerShell `.ps1` launchers for `mkcd`,
+`justmkcd`, `just`, `claude_`, and `codex_`. No init or profile changes are needed,
+including in `-NoProfile` sessions. Explicit `.exe` invocation bypasses them.
+For other shells, load `eval "$(just init bash)"` in Bash,
+`eval "$(just init zsh)"` in Zsh, or
+`just init fish | source` in Fish. Add the matching line to the shell profile
+to persist it. For an uninstalled PowerShell binary, manual setup is
+`just init powershell | Out-String | Invoke-Expression`. `just init` prints
+definitions and never edits the profile itself.
+
+`mkcd "my folder"` creates and enters exactly one directory. `mkcd -p a/b`
+creates missing parents and accepts an existing directory. Use `--` before a
+leading-dash path. Failures never change location. Without the shell functions,
+the native binary creates and prints the path but cannot move the parent shell.
+`just mkcd --print-path DIR` is the explicit create-and-print automation form;
+it never changes the shell directory. Paths are never saved by the bare UI.
+In PowerShell, quote the separator: `mkcd '--' --folder`; an unquoted `--`
+is consumed by PowerShell before it reaches a shell function.
+
+`claude_` and `codex_` are shell-only shortcuts for the installed external CLIs;
+they bypass permission prompts with the flags shown above and forward all
+arguments. They have no JustTools launcher or short dispatch command. Use them
+only when the user explicitly requests these modes. See `docs/mkcd.md`.
 
 ## Software setup examples
 
@@ -216,10 +246,41 @@ visible above the Headless command.
 just json data.json
 just json data.json --get user.name
 just pdf report-a.pdf report-b.pdf
+just pdf images guide.pdf --dry-run
+just pdf links guide.pdf --output links.txt
 just svg icon.svg
 just qr "https://example.com" --output link.png
 just port 4321 --json
 ```
+
+`justpdf images` writes `<name>-images/p<page>-<n>.<ext>` beside the PDF, or
+into the `--output` folder. JPEGs are copied byte-for-byte unless real
+transparency requires an RGBA PNG; raw images become PNG, and unsupported
+encodings are reported as skipped. `justpdf links` writes clickable URLs and
+bookmark URLs, deduplicated in first-seen order, to `<name>-links.txt` or the
+`--output` file or folder. Both accept `--pages` and `--dry-run`. See
+`docs/pdf.md`.
+
+```sh
+just links guide.pdf plan.xlsx --csv --dry-run
+just links programs --recursive --csv -o all-links.csv --yes
+just links notes.md -o -
+```
+
+`justlinks` reads PDFs (annotations, typed URLs, bookmarks), `.xlsx/.docx/.pptx`
+(hyperlinks, HYPERLINK formulas and fields, typed URLs), and text formats, and
+deduplicates across every input in first-seen order, ignoring casing throughout
+the URL. YouTube watch, `youtu.be`, Shorts, live, and embed variants (including
+mobile, music, and no-cookie hosts) become `https://www.youtube.com/watch?v=ID`
+with no extra parameters or fragment. Video IDs also match without casing;
+the first ID's spelling is retained. Other links retain their first spelling
+and parameters. Default output is
+`links.txt` (or `links.csv` with `--csv`) in the current folder; `-o -` prints.
+CSV columns are `url,title,file,location,occurrences`; a title is the link's
+text, a spreadsheet row's first text cell, or the label before a typed URL
+such as `Squat: https://…`. Legacy `.xls/.doc/.ppt` are reported as skipped.
+Files are read in parallel (`--jobs`, default CPUs up to 8) with
+deterministic output. See `docs/links.md`.
 
 ## Verification
 

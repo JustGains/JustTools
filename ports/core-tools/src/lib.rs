@@ -1,5 +1,6 @@
 pub mod common;
 pub mod json;
+pub mod links;
 pub mod pdf;
 pub mod port;
 pub mod qr;

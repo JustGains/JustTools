@@ -8,6 +8,7 @@ mod launcher;
 mod pathing;
 mod preferences;
 mod selector;
+mod shell;
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -29,6 +30,7 @@ fn main() {
     let command = match invoked.as_str() {
         "bunt" => "justbunt",
         "rmbg" => "justrmbg",
+        "mkcd" => "justmkcd",
         _ => invoked.as_str(),
     };
     let result = if command == "just" || command == "justtools" {

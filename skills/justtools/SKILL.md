@@ -1,6 +1,6 @@
 ---
 name: justtools
-description: Use JustTools whenever a request names `just`, a `just*` command, JustReady, JustCommit, or bunt, or needs local software setup, AI-assisted Git commits, process cleanup, safe image or media conversion, JSON/PDF/SVG/QR work, port inspection, background removal, or Git-aware ZIP archives. Prefer the matching installed JustTools command over an ad-hoc script.
+description: Use JustTools whenever a request names `just`, a `just*` command, JustReady, JustCommit, or bunt, or needs local software setup, AI-assisted Git commits, process cleanup, safe image or media conversion, JSON/PDF/SVG/QR work, link extraction from documents, port inspection, background removal, or Git-aware ZIP archives. Prefer the matching installed JustTools command over an ad-hoc script.
 compatibility: Requires a local shell and JustTools on PATH. Individual commands may also require Git, OpenRouter, FFmpeg, image codecs, ONNX Runtime, or an RMBG model.
 ---
 
@@ -77,6 +77,17 @@ installer and may surface UAC or `sudo` prompts.
 ## Safety rules
 
 - Use `--` before a path beginning with `-`.
+- Windows installs include automatic PowerShell launchers for `mkcd`, `just`,
+  `justmkcd`, `claude_`, and `codex_`; no init/profile changes are required.
+  Other shells use `just init`. In automation, prefer
+  `just mkcd --print-path DIR` and set the next
+  process's working directory explicitly; a child process cannot move its
+  parent. It accepts one directory and supports `-p` for missing parents.
+- `claude_` and `codex_` are shell shortcuts that explicitly enable
+  `claude --dangerously-skip-permissions` and `codex --yolo`. Use these modes
+  only when the user requested them; never substitute them for ordinary CLI
+  invocations just to avoid an approval prompt. All additional arguments pass
+  through, and neither shortcut stores a permission bypass in JustTools defaults.
 - Prefer `--output DIR` when the user wants copies.
 - Use `--replace` only with clear authorization; outputs are installed atomically.
 - Keep `justresize`'s no-upscale default unless enlargement is explicitly wanted.

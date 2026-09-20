@@ -365,6 +365,9 @@ impl App {
                     if !multiple && values.len() > 1 {
                         return Err(format!("{} accepts one value", entry.field.label));
                     }
+                    if self.tool.name == "justmkcd" {
+                        args.push(OsString::from("--"));
+                    }
                     args.extend(values.into_iter().map(OsString::from));
                 }
                 Kind::Text { flag } | Kind::Number { flag, .. } => {
@@ -500,6 +503,11 @@ impl App {
             "justport" if self.enabled("kill") => id == "json",
             "justrmbg" if self.enabled("check") => matches!(id, "input" | "output" | "model"),
             "justcommit" if !self.enabled("repair") => id == "repair_agent",
+            "justpdf" => match id {
+                "degrees" => self.value("operation") != "rotate",
+                "pages" => matches!(self.value("operation"), "auto" | "merge" | "split" | "info"),
+                _ => false,
+            },
             _ => false,
         }
     }
@@ -507,7 +515,13 @@ impl App {
     fn command(&self) -> String {
         match self.args() {
             Ok(args) => std::iter::once(self.tool.name.to_owned())
-                .chain(args.iter().map(|arg| quote(&arg.to_string_lossy())))
+                .chain(args.iter().map(|arg| {
+                    if cfg!(windows) && self.tool.name == "justmkcd" && arg == "--" {
+                        "'--'".into()
+                    } else {
+                        quote(&arg.to_string_lossy())
+                    }
+                }))
                 .collect::<Vec<_>>()
                 .join(" "),
             Err(_) => format!("{}  <complete required fields>", self.tool.name),
@@ -533,6 +547,21 @@ impl App {
     fn output_policy(&self) -> (String, String) {
         let separate_output = !self.value("output").trim().is_empty();
         match self.tool.name {
+            "justmkcd" => (
+                format!(
+                    "Destination: {}",
+                    if self.value("input").is_empty() {
+                        "choose one directory".into()
+                    } else {
+                        std::env::current_dir()
+                            .unwrap_or_default()
+                            .join(self.value("input"))
+                            .display()
+                            .to_string()
+                    }
+                ),
+                "Overwrite: never replaces files; existing directories need Create parents.".into(),
+            ),
             "justpng" => (
                 format!("Output: {}", self.destination("<same-name>.png")),
                 if separate_output {
@@ -682,8 +711,75 @@ impl App {
                     .into(),
                 )
             }
+            "justpdf" => {
+                let output = self.value("output").trim();
+                let chosen = || absolute_path(output).display().to_string();
+                let inside = |name: &str| absolute_path(output).join(name).display().to_string();
+                let operation = self.value("operation");
+                let destination = match (operation, output.is_empty()) {
+                    ("info", _) => "printed in the terminal".into(),
+                    ("auto", _) => {
+                        "info for one PDF; several merge into merged.pdf or Output".into()
+                    }
+                    ("merge", true) => absolute_path("merged.pdf").display().to_string(),
+                    ("split", true) => "beside the PDF in <name>-pages/001.pdf, 002.pdf, …".into(),
+                    ("split", false) => inside("001.pdf, 002.pdf, …"),
+                    ("extract", true) => "beside the PDF as <name>-pages-<range>.pdf".into(),
+                    ("rotate", true) => "beside the PDF as <name>-rotated.pdf".into(),
+                    ("images", true) => "beside the PDF in <name>-images/p001-01.jpg|png".into(),
+                    ("images", false) => inside("p001-01.jpg|png"),
+                    ("links", true) => "beside the PDF as <name>-links.txt".into(),
+                    ("links", false) => format!("{} (a folder gets <name>-links.txt)", chosen()),
+                    _ => chosen(),
+                };
+                let overwrite = match operation {
+                    "info" => "Overwrite: nothing is written.",
+                    "images" => {
+                        "Overwrite: PDF kept; JPEGs copied as-is, transparent/raw images as PNG; existing files need confirmation."
+                    }
+                    _ => "Overwrite: PDF kept; existing outputs need confirmation.",
+                };
+                (format!("Output: {destination}"), overwrite.into())
+            }
+            "justlinks" => {
+                let output = self.value("output").trim();
+                let csv =
+                    self.value("format") == "csv" || output.to_ascii_lowercase().ends_with(".csv");
+                let name = if csv { "links.csv" } else { "links.txt" };
+                let destination = match output {
+                    "" => absolute_path(name).display().to_string(),
+                    "-" => "printed in the terminal".into(),
+                    path => {
+                        let path = absolute_path(path);
+                        if path.is_dir() { path.join(name) } else { path }
+                            .display()
+                            .to_string()
+                    }
+                };
+                let format = if csv {
+                    "CSV: url, title, file, location, occurrences"
+                } else {
+                    "one unique link per line"
+                };
+                (
+                    format!("Output: {destination} ({format})"),
+                    "Overwrite: inputs are only read; an existing output needs confirmation."
+                        .into(),
+                )
+            }
             _ => (String::new(), String::new()),
         }
+    }
+}
+
+fn absolute_path(value: &str) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }
 
@@ -1414,6 +1510,27 @@ fn spec(name: &str) -> Option<Tool> {
         }));
     }
     Some(match name {
+        "justmkcd" => Tool {
+            name: "justmkcd",
+            title: "Mkcd",
+            summary: "Create a directory and enter it",
+            fields: vec![
+                toggle(
+                    "parents",
+                    "Create parents",
+                    "Create missing parents and accept an existing directory.",
+                    "--parents",
+                    true,
+                ),
+                input(
+                    "Directory",
+                    "One destination directory. Never saved. No files are overwritten.",
+                    false,
+                    None,
+                    true,
+                ),
+            ],
+        },
         "justcrop" => {
             let mut fields = vec![
                 input(
@@ -1723,25 +1840,27 @@ fn spec(name: &str) -> Option<Tool> {
         "justpdf" => Tool {
             name: "justpdf",
             title: "JustPDF",
-            summary: "Inspect and transform PDF files",
+            summary: "Transform PDFs or save their images and links",
             fields: vec![
                 choices(
                     "operation",
                     "Operation",
-                    "Auto shows info for one PDF and merges multiple PDFs.",
+                    "Auto: info for one PDF, merge for several. Images: every embedded image. Links: unique URLs in a .txt file, one per line.",
                     "auto",
                     vec![
                         choice("Auto", "auto", &[]),
                         choice("Merge", "merge", &["merge"]),
                         choice("Split", "split", &["split"]),
-                        choice("Extract", "extract", &["extract"]),
+                        choice("Extract pages", "extract", &["extract"]),
                         choice("Rotate", "rotate", &["rotate"]),
                         choice("Info", "info", &["info"]),
+                        choice("Images", "images", &["images"]),
+                        choice("Links", "links", &["links"]),
                     ],
                 ),
                 input(
                     "PDF files / folders",
-                    "Required. Use semicolons between multiple inputs.",
+                    "Required. Use semicolons between multiple inputs. Split, Extract, Rotate, Images, and Links take one PDF.",
                     true,
                     None,
                     true,
@@ -1749,7 +1868,7 @@ fn spec(name: &str) -> Option<Tool> {
                 text(
                     "output",
                     "Output",
-                    "Output PDF path or split output directory.",
+                    "PDF path, Split/Images folder, or Links .txt path. Blank writes beside the PDF.",
                     "",
                     "--output",
                     true,
@@ -1757,7 +1876,7 @@ fn spec(name: &str) -> Option<Tool> {
                 text(
                     "pages",
                     "Page range",
-                    "One-based range such as 1-3,5,last. Required for Extract.",
+                    "One-based range such as 1-3,5,last. Required for Extract; optional for Rotate, Images, and Links.",
                     "",
                     "--pages",
                     true,
@@ -1784,6 +1903,62 @@ fn spec(name: &str) -> Option<Tool> {
                     "dry_run",
                     "Dry run",
                     "Show planned outputs without writing. Applies to this run only.",
+                    "--dry-run",
+                    false,
+                ),
+            ],
+        },
+        "justlinks" => Tool {
+            name: "justlinks",
+            title: "JustLinks",
+            summary: "Extract every unique link with its title",
+            fields: vec![
+                input(
+                    "Files / folders",
+                    "Required. PDF, Excel, Word, PowerPoint, and text files; use semicolons between inputs. Folders include supported files.",
+                    true,
+                    None,
+                    true,
+                ),
+                choices(
+                    "format",
+                    "Format",
+                    "A text list has one unique link per line. CSV adds each link's title, file, location, and occurrence count.",
+                    "text",
+                    vec![
+                        choice("Text list", "text", &[]),
+                        choice("CSV with titles", "csv", &["--csv"]),
+                    ],
+                ),
+                text(
+                    "output",
+                    "Output",
+                    "File, an existing folder, or - to print. Blank writes links.txt or links.csv in the current folder.",
+                    "",
+                    "--output",
+                    true,
+                ),
+                toggle(
+                    "recursive",
+                    "Recursive",
+                    "Include nested folders.",
+                    "--recursive",
+                    true,
+                ),
+                number(
+                    "jobs",
+                    "Parallel jobs",
+                    "Files read at once; results keep input order.",
+                    jobs(8),
+                    "--jobs",
+                    1,
+                    256,
+                    1,
+                ),
+                toggle(
+                    "dry_run",
+                    "Dry run",
+                    "Show link counts and the destination without writing. Applies to this run only.",
                     "--dry-run",
                     false,
                 ),
@@ -2176,6 +2351,31 @@ mod tests {
     }
 
     #[test]
+    fn mkcd_launcher_protects_literal_directory_and_never_saves_it() {
+        let mut app = app_for("justmkcd");
+        assert!(app.args().is_err());
+        app.values
+            .iter_mut()
+            .find(|value| value.field.id == "parents")
+            .unwrap()
+            .value = "true".into();
+        let directory = app
+            .values
+            .iter_mut()
+            .find(|value| value.field.id == "input")
+            .unwrap();
+        assert!(!directory.field.persistent);
+        directory.value = "--new project".into();
+        assert_eq!(
+            app.args().unwrap(),
+            ["--parents", "--", "--new project"].map(OsString::from)
+        );
+        let (destination, overwrite) = app.output_policy();
+        assert!(destination.contains("--new project"));
+        assert!(overwrite.contains("never replaces"));
+    }
+
+    #[test]
     fn changed_defaults_are_in_the_command_and_persist() {
         let mut app = app_for("justjpg");
         app.selected = app
@@ -2293,6 +2493,68 @@ mod tests {
         let (output, overwrite) = optimize.output_policy();
         assert!(output.contains("<name>-optimized.<best>"));
         assert!(overwrite.contains("source kept"));
+    }
+
+    fn set(app: &mut App, id: &str, value: &str) {
+        app.values
+            .iter_mut()
+            .find(|entry| entry.field.id == id)
+            .unwrap()
+            .value = value.into();
+    }
+
+    #[test]
+    fn pdf_launcher_saves_images_and_links_with_explicit_destinations() {
+        let mut app = app_for("justpdf");
+        set(&mut app, "input", "guide.pdf");
+        set(&mut app, "pages", "2-3");
+        set(&mut app, "degrees", "180");
+        set(&mut app, "operation", "images");
+        assert_eq!(app.command(), "justpdf images guide.pdf --pages 2-3");
+        let (output, overwrite) = app.output_policy();
+        assert!(output.contains("<name>-images/p001-01.jpg|png"));
+        assert!(overwrite.contains("PDF kept"));
+
+        set(&mut app, "operation", "links");
+        set(&mut app, "output", "links_output.txt");
+        assert_eq!(
+            app.command(),
+            "justpdf links guide.pdf --output links_output.txt --pages 2-3"
+        );
+        assert!(app.output_policy().0.contains("links_output.txt"));
+
+        // Saved rotation and page values never leak into unrelated operations.
+        set(&mut app, "operation", "merge");
+        assert_eq!(
+            app.command(),
+            "justpdf merge guide.pdf --output links_output.txt"
+        );
+    }
+
+    #[test]
+    fn links_launcher_offers_csv_titles_and_recursive_scans() {
+        let mut app = app_for("justlinks");
+        assert!(app.args().is_err(), "files are required");
+        set(&mut app, "input", "guide.pdf; plan.xlsx");
+        set(&mut app, "format", "csv");
+        set(&mut app, "recursive", "true");
+        assert_eq!(
+            app.command(),
+            "justlinks guide.pdf plan.xlsx --csv --recursive"
+        );
+        let (output, overwrite) = app.output_policy();
+        assert!(output.contains("links.csv") && output.contains("title"));
+        assert!(overwrite.contains("only read"));
+        set(&mut app, "output", "-");
+        assert!(app.output_policy().0.contains("printed in the terminal"));
+        assert!(
+            !app.values
+                .iter()
+                .find(|value| value.field.id == "input")
+                .unwrap()
+                .field
+                .persistent
+        );
     }
 
     #[test]

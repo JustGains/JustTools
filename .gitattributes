@@ -6,3 +6,5 @@
 *.rs   text eol=lf
 *.toml text eol=lf
 *.yml  text eol=lf
+*.sh   text eol=lf
+*.fish text eol=lf

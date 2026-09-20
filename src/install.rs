@@ -49,6 +49,10 @@ An existing managed JustTools installation is moved to a timestamped backup;
 failed upgrades are rolled back. Files not recognized as JustTools are never
 replaced.
 
+On Windows, also installs PowerShell launchers for mkcd, justmkcd, just,
+claude_, and codex_. Shell integration loads automatically; no init or profile
+edit is needed.
+
 Options:
       --bin-dir DIR  Installation directory
   -y, --yes          Skip replacement and PATH confirmations
@@ -133,7 +137,7 @@ fn executable_name(base: &str) -> String {
 
 fn command_names() -> Vec<&'static str> {
     let mut names: Vec<_> = COMMANDS.iter().map(|command| command.name).collect();
-    names.extend(["bunt", "just", "rmbg"]);
+    names.extend(["bunt", "just", "mkcd", "rmbg"]);
     names.sort_unstable();
     names.dedup();
     names
@@ -141,6 +145,16 @@ fn command_names() -> Vec<&'static str> {
 
 fn native_names() -> Vec<String> {
     command_names().into_iter().map(executable_name).collect()
+}
+
+fn installed_names() -> Vec<String> {
+    let mut names = native_names();
+    names.extend(
+        crate::shell::installed_launchers()
+            .iter()
+            .map(|(name, _)| format!("{name}.ps1")),
+    );
+    names
 }
 
 fn legacy_candidate_names() -> BTreeSet<String> {
@@ -236,7 +250,7 @@ fn files_identical(left: &Path, right: &Path) -> bool {
 
 fn manifest_contents() -> String {
     let mut contents = format!("{MANIFEST_HEADER}\n");
-    for name in native_names() {
+    for name in installed_names() {
         contents.push_str(&name);
         contents.push('\n');
     }
@@ -244,7 +258,7 @@ fn manifest_contents() -> String {
 }
 
 fn discover_managed_files(source: &Path, bin: &Path) -> ToolResult<Vec<PathBuf>> {
-    let allowed_names: HashSet<_> = native_names().into_iter().collect();
+    let allowed_names: HashSet<_> = installed_names().into_iter().collect();
     let manifest = bin.join(MANIFEST_NAME);
     let mut managed = legacy_files(bin);
 
@@ -440,6 +454,14 @@ fn stage_installation(source: &Path, bin: &Path) -> ToolResult<tempfile::TempDir
             })?;
         }
     }
+    for (name, script) in crate::shell::installed_launchers() {
+        fs::write(stage.path().join(format!("{name}.ps1")), script).map_err(|error| {
+            ToolError::new(
+                "just",
+                format!("cannot stage {name} PowerShell launcher: {error}"),
+            )
+        })?;
+    }
     fs::write(stage.path().join(MANIFEST_NAME), manifest_contents())
         .map_err(|error| ToolError::new("just", format!("cannot stage manifest: {error}")))?;
     Ok(stage)
@@ -492,7 +514,7 @@ fn install_transaction(
     }
 
     let main_name = executable_name("just");
-    let mut targets = native_names();
+    let mut targets = installed_names();
     targets.retain(|name| name != &main_name);
     targets.insert(0, main_name.clone());
     targets.push(MANIFEST_NAME.to_owned());
@@ -561,6 +583,13 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         println!(
             "just: previous managed installation backed up to {}",
             backup.display()
+        );
+    }
+    if cfg!(windows) {
+        println!("just: PowerShell helpers are automatic: mkcd, claude_, codex_ (no init needed).");
+    } else {
+        println!(
+            "just: enable shell helpers with just init <powershell|bash|zsh|fish>; see docs/mkcd.md"
         );
     }
     if options.add_path && !crate::pathing::contains(&bin) {
@@ -658,6 +687,17 @@ mod tests {
         for name in native_names() {
             assert_eq!(fs::read(bin.join(name)).unwrap(), b"native suite");
         }
+        for (name, script) in crate::shell::installed_launchers() {
+            assert_eq!(
+                fs::read_to_string(bin.join(format!("{name}.ps1"))).unwrap(),
+                script
+            );
+            assert!(
+                fs::read_to_string(bin.join(MANIFEST_NAME))
+                    .unwrap()
+                    .contains(&format!("{name}.ps1\n"))
+            );
+        }
         assert!(bin.join(MANIFEST_NAME).is_file());
     }
 
@@ -674,6 +714,42 @@ mod tests {
         assert_eq!(
             fs::read(bin.join(executable_name("justvideo"))).unwrap(),
             b"running suite"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn unrelated_shortcut_script_is_never_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("downloaded");
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(&source, "native suite").unwrap();
+        fs::write(bin.join("claude_.ps1"), "user-owned shortcut").unwrap();
+        let error = discover_managed_files(&source, &bin).unwrap_err();
+        assert!(error.message().contains("unrelated file"));
+        assert_eq!(
+            fs::read_to_string(bin.join("claude_.ps1")).unwrap(),
+            "user-owned shortcut"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn failed_upgrade_restores_shell_launchers() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("downloaded");
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(&source, "new suite").unwrap();
+        fs::write(bin.join("mkcd.ps1"), "previous managed shell launcher").unwrap();
+        write_manifest(&bin);
+        let managed = discover_managed_files(&source, &bin).unwrap();
+        let error = install_transaction(&source, &bin, &managed, Some(2)).unwrap_err();
+        assert!(error.message().contains("previous installation restored"));
+        assert_eq!(
+            fs::read_to_string(bin.join("mkcd.ps1")).unwrap(),
+            "previous managed shell launcher"
         );
     }
 }

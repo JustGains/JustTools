@@ -5,6 +5,12 @@ example, `justjpg`, `justresize`, `justpdf`, and `justcommit` open a settings
 launcher; `justports`, `bunt`, and `justready` keep their purpose-built live
 dashboards. Bare `just` opens the same styled tool browser.
 
+Bare `mkcd` / `justmkcd` opens a directory launcher. Its **Create parents** row
+is saved; the destination is never saved. Windows PowerShell installations
+enter the directory automatically after Run; other shells use
+[shell integration](mkcd.md). The `claude_` and `codex_` shell shortcuts invoke
+their respective external CLIs directly.
+
 The command-line contract is unchanged when any explicit argument is present
 or stdin/stdout is redirected. This keeps scripts, pipes, CI, aliases, and
 short dispatch deterministic:
@@ -93,6 +99,7 @@ The following settings are remembered when changed:
 | `justcrop` | Bounds mode, alpha threshold, padding, output, replacement, jobs, recursion |
 | `justjson` / `justsvg` | Formatting/optimization choices, output, recursion |
 | `justpdf` | Operation, output, page range, rotation, recursion |
+| `justlinks` | Text or CSV format, output, recursion, parallel jobs |
 | `justport` | Whether UDP endpoints are included |
 | `justqr` | Output, format, size, correction level, margin, colors |
 | `justrmbg` | Provider, output, and optional model path; pinned-dependency download permission is visible but one-run |
@@ -104,8 +111,9 @@ When two saved choices cannot coexist, the launcher makes the displayed
 Headless command safe and valid. An output directory takes precedence over a
 saved replace/remove-source choice; resize width/height take precedence over
 maximum-square sizing; JSON `--get` suppresses incompatible write/check actions;
-RMBG runtime check suppresses image/output/model values; and terminal QR output
-suppresses a file path.
+RMBG runtime check suppresses image/output/model values; terminal QR output
+suppresses a file path; and PDF page range and rotation appear only for the
+operations that use them.
 
 ## Purpose-built dashboards
 

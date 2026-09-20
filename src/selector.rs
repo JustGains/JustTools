@@ -34,6 +34,7 @@ fn list() {
     }
     println!("\nrun: just <tool> [args]   (e.g. `just qr hello`, `just help video`)");
     println!("defaults: just --defaults-path   (interactive changes save automatically)");
+    println!("shell: just init <powershell|bash|zsh|fish>   (mkcd, claude_, codex_)");
 }
 
 fn normalized_tool(value: &str) -> String {
@@ -51,6 +52,9 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     }
     if args.first().is_some_and(|arg| arg == "install") {
         return crate::install::run(args.into_iter().skip(1).collect());
+    }
+    if args.first().is_some_and(|arg| arg == "init") {
+        return crate::shell::run(args.into_iter().skip(1).collect());
     }
     if args
         .first()

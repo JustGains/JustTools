@@ -9,21 +9,27 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod images;
+mod links;
+mod text;
+
+use crate::links::{Found, labeled_urls, title_from};
+
 #[derive(Debug, Parser)]
 #[command(
     name = "justpdf",
-    about = "Inspect, merge, split, extract, or rotate PDFs.",
-    after_help = "PDF inputs are never removed. Page numbers are one-based; ranges look like 1-3,5,last.\nWith no command, one PDF shows info and multiple PDFs are merged to merged.pdf.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
+    about = "Inspect, merge, split, extract, or rotate PDFs, or save their images and links.",
+    after_help = "PDF inputs are never removed. Page numbers are one-based; ranges look like 1-3,5,last.\nWith no command, one PDF shows info and multiple PDFs are merged to merged.pdf.\nimages keeps original JPEG/JPEG 2000 bytes; transparent or raw images become PNG.\nlinks writes each unique URL once, one per line, in first-seen order.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Merge/extract/rotate file, or split directory.
+    /// Merge/extract/rotate/links file, or split/images directory.
     #[arg(short = 'o', long, value_name = "PATH", global = true)]
     output: Option<PathBuf>,
 
-    /// Pages for extract (required) or rotate (default: all).
+    /// Pages for extract (required) or rotate/images/links (default: all).
     #[arg(short = 'p', long, value_name = "RANGE", global = true)]
     pages: Option<String>,
 
@@ -75,6 +81,16 @@ enum Command {
         #[arg(value_name = "PDF", required = true)]
         inputs: Vec<PathBuf>,
     },
+    /// Save every embedded image to a folder.
+    Images {
+        #[arg(value_name = "PDF", required = true)]
+        inputs: Vec<PathBuf>,
+    },
+    /// Write unique hyperlinks to a text file.
+    Links {
+        #[arg(value_name = "PDF", required = true)]
+        inputs: Vec<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +100,8 @@ enum Operation {
     Extract,
     Rotate,
     Info,
+    Images,
+    Links,
 }
 
 pub fn run() -> Result<()> {
@@ -103,6 +121,8 @@ fn run_with(options: Cli) -> Result<()> {
         Some(Command::Extract { inputs }) => (Some(Operation::Extract), inputs.clone()),
         Some(Command::Rotate { inputs }) => (Some(Operation::Rotate), inputs.clone()),
         Some(Command::Info { inputs }) => (Some(Operation::Info), inputs.clone()),
+        Some(Command::Images { inputs }) => (Some(Operation::Images), inputs.clone()),
+        Some(Command::Links { inputs }) => (Some(Operation::Links), inputs.clone()),
         None => (None, options.inputs.clone()),
     };
     if raw_inputs.is_empty() && !stdin_is_terminal() {
@@ -126,7 +146,11 @@ fn run_with(options: Cli) -> Result<()> {
     });
     if matches!(
         operation,
-        Operation::Split | Operation::Extract | Operation::Rotate
+        Operation::Split
+            | Operation::Extract
+            | Operation::Rotate
+            | Operation::Images
+            | Operation::Links
     ) && files.len() != 1
     {
         bail!("{} needs exactly one PDF", operation.name());
@@ -138,6 +162,8 @@ fn run_with(options: Cli) -> Result<()> {
         Operation::Extract => extract(&files[0], &options),
         Operation::Rotate => rotate(&files[0], &options),
         Operation::Info => info(&files),
+        Operation::Images => images::run(&files[0], &options),
+        Operation::Links => links::run(&files[0], &options),
     }
 }
 
@@ -149,8 +175,108 @@ impl Operation {
             Self::Extract => "extract",
             Self::Rotate => "rotate",
             Self::Info => "info",
+            Self::Images => "images",
+            Self::Links => "links",
         }
     }
+}
+
+/// Every link in a PDF with its title and page, including repeats: link
+/// annotations titled by the text under them, URLs typed in page text, and
+/// bookmarks.
+pub(crate) fn link_occurrences(path: &Path) -> Result<Vec<Found>> {
+    let document = load_pdf(path)?;
+    let pages = document.get_pages();
+    let selected: Vec<u32> = pages.keys().copied().collect();
+    let occurrences = links::occurrences(&document, &selected);
+    let mut by_page: BTreeMap<u32, Vec<&links::Occurrence>> = BTreeMap::new();
+    for occurrence in &occurrences {
+        if let Some(page) = occurrence.page {
+            by_page.entry(page).or_default().push(occurrence);
+        }
+    }
+    let mut found = Vec::new();
+    for (number, page_id) in &pages {
+        let glyphs = text::page_glyphs(&document, *page_id);
+        let annotated = by_page.get(number).map(Vec::as_slice).unwrap_or_default();
+        let location = format!("page {number}");
+        for (uri, rects) in wrapped_links(annotated) {
+            let text: Vec<String> = rects
+                .iter()
+                .map(|rect| text::text_inside(&glyphs, *rect))
+                .collect();
+            found.push(Found {
+                url: uri.to_owned(),
+                title: title_from(&text.join(" ")),
+                location: location.clone(),
+            });
+        }
+        for line in text::lines(&glyphs) {
+            for (_, url, title) in labeled_urls(&line) {
+                // A URL wrapped onto a second line shows only its start; the
+                // link annotation over it holds the whole address.
+                let partial = annotated.iter().any(|occurrence| {
+                    occurrence.uri.len() > url.len() && occurrence.uri.starts_with(url)
+                });
+                if !partial {
+                    found.push(Found {
+                        url: url.to_owned(),
+                        title,
+                        location: location.clone(),
+                    });
+                }
+            }
+        }
+    }
+    found.extend(
+        occurrences
+            .into_iter()
+            .filter(|occurrence| occurrence.page.is_none())
+            .map(|occurrence| Found {
+                url: occurrence.uri,
+                title: occurrence.title.unwrap_or_default(),
+                location: "bookmarks".into(),
+            }),
+    );
+    Ok(found)
+}
+
+/// Groups one page's link annotations into visual links. Some producers
+/// draw one rectangle per line of wrapped link text; same-URI rectangles
+/// that stack with horizontal overlap form one link, top to bottom.
+fn wrapped_links<'a>(annotated: &[&'a links::Occurrence]) -> Vec<(&'a str, Vec<[f64; 4]>)> {
+    let mut groups: Vec<(&str, Vec<[f64; 4]>)> = Vec::new();
+    for occurrence in annotated {
+        let Some(rect) = occurrence.rect else {
+            groups.push((&occurrence.uri, Vec::new()));
+            continue;
+        };
+        let (left, right) = (rect[0].min(rect[2]), rect[0].max(rect[2]));
+        let (bottom, top) = (rect[1].min(rect[3]), rect[1].max(rect[3]));
+        let continues = |group: &&mut (&str, Vec<[f64; 4]>)| {
+            group.0 == occurrence.uri
+                && group.1.last().is_some_and(|above| {
+                    let (above_bottom, above_top) =
+                        (above[1].min(above[3]), above[1].max(above[3]));
+                    let tolerance = (above_top - above_bottom).min(top - bottom) * 0.5;
+                    (top - above_bottom).abs() <= tolerance
+                        && left < above[0].max(above[2])
+                        && right > above[0].min(above[2])
+                })
+        };
+        match groups.iter_mut().rev().find(continues) {
+            Some(group) => group.1.push(rect),
+            None => groups.push((&occurrence.uri, vec![rect])),
+        }
+    }
+    groups
+}
+
+fn document_stem(input: &Path) -> &str {
+    input
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("document")
 }
 
 fn load_pdf(path: &Path) -> Result<Document> {
@@ -228,10 +354,7 @@ fn merge(files: &[PathBuf], options: &Cli) -> Result<()> {
 fn split(input: &Path, options: &Cli) -> Result<()> {
     let source = load_pdf(input)?;
     let pages = source.get_pages().len();
-    let stem = input
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("document");
+    let stem = document_stem(input);
     let default_directory = input.with_file_name(format!("{stem}-pages"));
     let output_directory =
         absolute_lexical(options.output.as_deref().unwrap_or(&default_directory))?;
@@ -267,10 +390,7 @@ fn extract(input: &Path, options: &Cli) -> Result<()> {
         .ok_or_else(|| anyhow!("extract requires --pages RANGE"))?;
     let source = load_pdf(input)?;
     let selected = selected_pages(expression, source.get_pages().len())?;
-    let stem = input
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("document");
+    let stem = document_stem(input);
     let safe_range: String = expression
         .chars()
         .map(|character| {
@@ -316,10 +436,7 @@ fn rotate(input: &Path, options: &Cli) -> Result<()> {
         options.pages.as_deref().unwrap_or("all"),
         document.get_pages().len(),
     )?;
-    let stem = input
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("document");
+    let stem = document_stem(input);
     let default_output = input.with_file_name(format!("{stem}-rotated.pdf"));
     let output = absolute_lexical(options.output.as_deref().unwrap_or(&default_output))?;
     if same_path(input, &output) {
@@ -559,6 +676,15 @@ fn resolve_object<'a>(document: &'a Document, object: &'a Object) -> lopdf::Resu
     }
 }
 
+/// Resolves a dictionary or a stream's dictionary.
+fn dictionary<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Dictionary> {
+    match resolve_object(document, object).ok()? {
+        Object::Dictionary(dictionary) => Some(dictionary),
+        Object::Stream(stream) => Some(&stream.dict),
+        _ => None,
+    }
+}
+
 fn page_size(document: &Document, page_id: ObjectId) -> Option<(f64, f64)> {
     let media_box = inherited_attribute(document, page_id, b"MediaBox")?;
     let media_box = resolve_object(document, &media_box).ok()?.as_array().ok()?;
@@ -601,6 +727,33 @@ mod tests {
         assert_eq!(selected_pages("3,1", 3).unwrap(), [3, 1]);
         assert!(selected_pages("3-1", 3).is_err());
         assert!(selected_pages("0", 3).is_err());
+    }
+
+    #[test]
+    fn stacked_same_link_rectangles_form_one_wrapped_link() {
+        let line = |uri: &str, rect: [f64; 4]| links::Occurrence {
+            uri: uri.into(),
+            page: Some(1),
+            rect: Some(rect),
+            title: None,
+        };
+        // "Machine Chest" over "Press", as a Figma export draws them.
+        let first = line("https://a.test", [197.7, 1019.6, 302.3, 1039.4]);
+        let second = line("https://a.test", [229.3, 1001.6, 267.8, 1021.4]);
+        let later_row = line("https://a.test", [197.7, 921.6, 302.3, 941.4]);
+        let other = line("https://b.test", [229.3, 983.6, 267.8, 1003.4]);
+        let groups: Vec<_> = wrapped_links(&[&first, &second, &later_row, &other])
+            .into_iter()
+            .map(|(uri, rects)| (uri, rects.len()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("https://a.test", 2),
+                ("https://a.test", 1),
+                ("https://b.test", 1)
+            ]
+        );
     }
 
     #[test]

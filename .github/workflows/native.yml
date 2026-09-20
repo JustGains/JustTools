@@ -110,6 +110,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Install shells for Linux helper integration tests
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+
       - name: Lint every target
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
