@@ -1,13 +1,13 @@
 [package]
 name = "justtools"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Fast, opinionated, cross-platform just* command-line tools"
 license = "MIT"
 
 [workspace]
-members = ["ports/core-tools"]
+members = ["explorer/menu", "explorer/shell", "ports/core-tools"]
 default-members = ["."]
 resolver = "3"
 
@@ -27,6 +27,7 @@ flate2 = "1.1"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "qoi", "tiff", "webp"] }
 jpeg-encoder = "0.7.1"
 justtools-core = { path = "ports/core-tools" }
+justtools-menu = { path = "explorer/menu" }
 netstat2 = "0.11.2"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["api-22", "coreml", "cuda", "directml", "load-dynamic", "std"] }
 rayon = "1.10"
@@ -45,7 +46,7 @@ webp = { version = "0.3.1", default-features = false }
 zip = { version = "4.3", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 winreg = "0.55"
 
 [dev-dependencies]

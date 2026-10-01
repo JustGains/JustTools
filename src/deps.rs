@@ -101,6 +101,7 @@ enum Dependency {
     Pngquant,
     Cwebp,
     Git,
+    YtDlp,
 }
 
 impl Dependency {
@@ -110,6 +111,7 @@ impl Dependency {
             "pngquant" => Some(Self::Pngquant),
             "cwebp" => Some(Self::Cwebp),
             "git" => Some(Self::Git),
+            "yt-dlp" => Some(Self::YtDlp),
             _ => None,
         }
     }
@@ -120,6 +122,7 @@ impl Dependency {
             Self::Pngquant => "pngquant",
             Self::Cwebp => "cwebp",
             Self::Git => "Git",
+            Self::YtDlp => "yt-dlp",
         }
     }
 
@@ -129,6 +132,7 @@ impl Dependency {
             Self::Pngquant => &["pngquant"],
             Self::Cwebp => &["cwebp"],
             Self::Git => &["git"],
+            Self::YtDlp => &["yt-dlp"],
         }
     }
 }
@@ -344,7 +348,8 @@ struct SystemRunner;
 
 impl DependencyRunner for SystemRunner {
     fn find(&mut self, program: &str) -> Option<PathBuf> {
-        find_executable(program)
+        // A copy on PATH always wins over the one JustTools downloaded.
+        find_executable(program).or_else(|| crate::managed::find(program))
     }
 
     fn run(&mut self, command: &CommandSpec) -> io::Result<Option<i32>> {
@@ -394,7 +399,13 @@ enum RequestPolicy {
     ResolveOnly(String),
 }
 
-const DEPENDENCY_OVERRIDES: [&str; 4] = ["FFMPEG_BIN", "PNGQUANT_BIN", "CWEBP_BIN", "GIT_BIN"];
+const DEPENDENCY_OVERRIDES: [&str; 5] = [
+    "FFMPEG_BIN",
+    "PNGQUANT_BIN",
+    "CWEBP_BIN",
+    "GIT_BIN",
+    "YTDLP_BIN",
+];
 
 fn request_policy(requested: &str) -> RequestPolicy {
     request_policy_with(requested, |name| env::var_os(name))
@@ -470,6 +481,7 @@ fn windows_plan<R: DependencyRunner>(
         Dependency::Ffmpeg => "Gyan.FFmpeg",
         Dependency::Cwebp => "Google.Libwebp",
         Dependency::Git => "Git.Git",
+        Dependency::YtDlp => "yt-dlp.yt-dlp",
         Dependency::Pngquant => unreachable!(),
     };
     let winget = runner
@@ -614,18 +626,22 @@ fn package_for(installer: Installer, dependency: Dependency) -> &'static str {
         (Installer::Homebrew, Dependency::Pngquant) => "pngquant",
         (Installer::Homebrew, Dependency::Cwebp) => "webp",
         (Installer::Homebrew, Dependency::Git) => "git",
+        (Installer::Homebrew, Dependency::YtDlp) => "yt-dlp",
         (Installer::Apt, Dependency::Ffmpeg) => "ffmpeg",
         (Installer::Apt, Dependency::Pngquant) => "pngquant",
         (Installer::Apt, Dependency::Cwebp) => "webp",
         (Installer::Apt, Dependency::Git) => "git",
+        (Installer::Apt, Dependency::YtDlp) => "yt-dlp",
         (Installer::Dnf, Dependency::Ffmpeg) => "ffmpeg-free",
         (Installer::Dnf, Dependency::Pngquant) => "pngquant",
         (Installer::Dnf, Dependency::Cwebp) => "libwebp-tools",
         (Installer::Dnf, Dependency::Git) => "git",
+        (Installer::Dnf, Dependency::YtDlp) => "yt-dlp",
         (Installer::Pacman, Dependency::Ffmpeg) => "ffmpeg",
         (Installer::Pacman, Dependency::Pngquant) => "pngquant",
         (Installer::Pacman, Dependency::Cwebp) => "libwebp-utils",
         (Installer::Pacman, Dependency::Git) => "git",
+        (Installer::Pacman, Dependency::YtDlp) => "yt-dlp",
         _ => unreachable!("package requested for an installer without package names"),
     }
 }
@@ -701,8 +717,78 @@ fn ensure_dependency<R: DependencyRunner, I: DependencyInteraction>(
     }
 }
 
-/// Resolve a dependency, offering a confirmed native installation only for the
-/// canonical names `ffmpeg`, `pngquant`, `cwebp`, and `git`.
+/// Resolve a dependency, honoring an explicit `*_BIN` override before falling
+/// back to the standard executable name.
+///
+/// An override that names an existing file is used as-is; any other value is
+/// resolved on `PATH` without offering an installation.
+pub fn require_override(tool: &str, variable: &str, standard: &str) -> ToolResult<PathBuf> {
+    let Some(requested) = env::var_os(variable).filter(|value| !value.is_empty()) else {
+        return require(tool, standard);
+    };
+    let path = PathBuf::from(&requested);
+    if path.is_file() {
+        return Ok(path);
+    }
+    let text = requested.to_str().ok_or_else(|| {
+        ToolError::new(
+            tool,
+            format!(
+                "{variable} points to a missing non-UTF-8 path: {}",
+                path.to_string_lossy()
+            ),
+        )
+    })?;
+    require(tool, text)
+}
+
+/// Find yt-dlp wherever it already is, without installing or downloading it.
+pub fn installed_yt_dlp() -> Option<PathBuf> {
+    match env::var_os("YTDLP_BIN").filter(|value| !value.is_empty()) {
+        Some(explicit) => {
+            let path = PathBuf::from(&explicit);
+            if path.is_file() {
+                Some(path)
+            } else {
+                explicit.to_str().and_then(find_executable)
+            }
+        }
+        None => find_executable("yt-dlp").or_else(|| crate::managed::find("yt-dlp")),
+    }
+}
+
+/// Download yt-dlp or FFmpeg into the per-user folder when it is missing.
+///
+/// These two are fetched without asking: both ship as self-contained vendor
+/// builds, nothing outside JustTools' own folder changes, and every download is
+/// verified. A failure is reported and resolution falls back to the platform
+/// package manager, which still asks first.
+fn download_if_missing<R: DependencyRunner>(
+    tool: &str,
+    requested: &str,
+    dependency: Dependency,
+    runner: &mut R,
+) {
+    let program = match dependency {
+        Dependency::Ffmpeg => crate::managed::Program::Ffmpeg,
+        Dependency::YtDlp => crate::managed::Program::YtDlp,
+        _ => return,
+    };
+    if !crate::managed::enabled()
+        || inspect_dependency(dependency, requested, runner)
+            .1
+            .is_empty()
+    {
+        return;
+    }
+    if let Err(message) = crate::managed::fetch(tool, program) {
+        eprintln!("{tool}: automatic download failed: {message}");
+    }
+}
+
+/// Resolve a dependency. Missing yt-dlp and FFmpeg are downloaded
+/// automatically; otherwise a confirmed native installation is offered for the
+/// canonical names `ffmpeg`, `pngquant`, `cwebp`, `git`, and `yt-dlp`.
 ///
 /// Explicit paths, custom executable names, and values supplied through a
 /// `*_BIN` override are resolve-only and never launch an installer.
@@ -723,6 +809,7 @@ pub fn require(tool: &str, requested: &str) -> ToolResult<PathBuf> {
     let RequestPolicy::Install(dependency) = policy else {
         unreachable!();
     };
+    download_if_missing(tool, requested, dependency, &mut runner);
     let platform = Platform::current().map_err(|error| error.into_tool_error(tool))?;
     let mut interaction = SystemInteraction::new();
     match ensure_dependency(
@@ -968,6 +1055,13 @@ mod tests {
             (Platform::Windows, Dependency::Ffmpeg, "Gyan.FFmpeg"),
             (Platform::Windows, Dependency::Cwebp, "Google.Libwebp"),
             (Platform::Windows, Dependency::Git, "Git.Git"),
+            (Platform::Windows, Dependency::YtDlp, "yt-dlp.yt-dlp"),
+            (Platform::MacOs, Dependency::YtDlp, "brew install yt-dlp"),
+            (
+                Platform::Linux,
+                Dependency::YtDlp,
+                "apt-get install -y yt-dlp",
+            ),
             (Platform::MacOs, Dependency::Cwebp, "brew install webp"),
             (
                 Platform::Linux,

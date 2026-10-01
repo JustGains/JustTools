@@ -1,0 +1,41 @@
+[package]
+name = "justtools-shell"
+version = "2.6.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "Windows File Explorer context-menu extension for JustTools"
+build = "build.rs"
+
+[lib]
+name = "justtools_shell"
+crate-type = ["cdylib"]
+# The library is empty off Windows and has no tests of its own; the menu it
+# shows is tested in justtools-menu.
+test = false
+doctest = false
+
+[target.'cfg(windows)'.dependencies]
+justtools-menu = { path = "../menu" }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# The `implement` macro names this crate directly.
+windows-core = "0.61"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+justtools-menu = { path = "../menu" }

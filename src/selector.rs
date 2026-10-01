@@ -35,6 +35,9 @@ fn list() {
     println!("\nrun: just <tool> [args]   (e.g. `just qr hello`, `just help video`)");
     println!("defaults: just --defaults-path   (interactive changes save automatically)");
     println!("shell: just init <powershell|bash|zsh|fish>   (mkcd, claude_, codex_)");
+    if cfg!(windows) {
+        println!("explorer: just context install   (right-click menu for files and folders)");
+    }
 }
 
 fn normalized_tool(value: &str) -> String {
@@ -52,6 +55,12 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     }
     if args.first().is_some_and(|arg| arg == "install") {
         return crate::install::run(args.into_iter().skip(1).collect());
+    }
+    if args.first().is_some_and(|arg| arg == "context") {
+        return crate::context::run(args.into_iter().skip(1).collect());
+    }
+    if args.first().is_some_and(|arg| arg == "deps") {
+        return fetch_dependencies(&args[1..]);
     }
     if args.first().is_some_and(|arg| arg == "init") {
         return crate::shell::run(args.into_iter().skip(1).collect());
@@ -136,6 +145,37 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     } else {
         commands::dispatch(COMMANDS[selection].name, Vec::new())
     }
+}
+
+/// `just deps fetch <yt-dlp|ffmpeg> ...` downloads the managed copy of each
+/// named program now, whether or not one is already on `PATH`.
+fn fetch_dependencies(args: &[OsString]) -> ToolResult {
+    let usage = || ToolError::usage("just", "usage: just deps fetch <yt-dlp|ffmpeg> ...");
+    let (Some(command), names) = (args.first(), args.get(1..).unwrap_or_default()) else {
+        return Err(usage());
+    };
+    if command != "fetch" || names.is_empty() {
+        return Err(usage());
+    }
+    for name in names {
+        let program = name
+            .to_str()
+            .and_then(crate::managed::Program::from_name)
+            .ok_or_else(usage)?;
+        let directory = crate::managed::fetch("just", program)
+            .map_err(|message| ToolError::new("just", message))?;
+        println!("{}", directory.display());
+    }
+    Ok(())
+}
+
+/// Let the user choose a tool from the browser without running it.
+pub(crate) fn pick() -> ToolResult<Option<&'static str>> {
+    let selection = choose(None)
+        .map_err(|error| ToolError::new("just", format!("terminal UI failed: {error}")))?;
+    Ok(selection
+        .and_then(|index| COMMANDS.get(index))
+        .map(|command| command.name))
 }
 
 struct App {

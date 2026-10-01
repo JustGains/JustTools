@@ -93,13 +93,15 @@ The following settings are remembered when changed:
 
 | Tool group | Saved settings |
 | --- | --- |
-| Image/media tools | Quality, speed/method, sample rate, bitrate, output, parallel jobs, recursion, target re-encoding, source handling |
+| Image/media tools | Quality, speed/method, video resolution, sample rate, bitrate, output, parallel jobs, recursion, target re-encoding, source handling |
 | `justoptimize` | Web quality, output, replacement, parallel jobs, recursion |
 | `justresize` | Maximum/width/height, crop, upscale, JPEG quality, output, replacement, jobs, recursion |
 | `justcrop` | Bounds mode, alpha threshold, padding, output, replacement, jobs, recursion |
 | `justjson` / `justsvg` | Formatting/optimization choices, output, recursion |
 | `justpdf` | Operation, output, page range, rotation, recursion |
 | `justlinks` | Text or CSV format, output, recursion, parallel jobs |
+| `justip` | Address family, output format, and lookup timeout |
+| `justpaste` | Output folder and playlist downloads; links are never saved |
 | `justport` | Whether UDP endpoints are included |
 | `justqr` | Output, format, size, correction level, margin, colors |
 | `justrmbg` | Provider, output, and optional model path; pinned-dependency download permission is visible but one-run |

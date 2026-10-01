@@ -1,0 +1,9 @@
+[package]
+name = "justtools-menu"
+version = "2.6.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "The JustTools File Explorer context-menu model shared by the shell extension and the CLI"
+
+[dependencies]

@@ -1,7 +1,7 @@
 ---
 name: justtools
 description: Use JustTools whenever a request names `just`, a `just*` command, JustReady, JustCommit, or bunt, or needs local software setup, AI-assisted Git commits, process cleanup, safe image or media conversion, JSON/PDF/SVG/QR work, link extraction from documents, port inspection, background removal, or Git-aware ZIP archives. Prefer the matching installed JustTools command over an ad-hoc script.
-compatibility: Requires a local shell and JustTools on PATH. Individual commands may also require Git, OpenRouter, FFmpeg, image codecs, ONNX Runtime, or an RMBG model.
+compatibility: Requires a local shell and JustTools on PATH. Individual commands may also require Git, OpenRouter, FFmpeg, yt-dlp, image codecs, ONNX Runtime, or an RMBG model.
 ---
 
 # JustTools
@@ -47,9 +47,21 @@ Claude-only or Codex-only tool name when a normal shell operation is sufficient.
 
 ## Dependency consent
 
-Some media commands need FFmpeg, pngquant, cwebp, or Git. RMBG may need ONNX
-Runtime and its model. JustTools discovers these only when needed and asks for
-interactive confirmation before installing or downloading them. JustRMBG's
+Some media commands need FFmpeg, pngquant, cwebp, or Git, and `justpaste` and
+an `http(s)` input to `justvideo`, `justaudio`, `justmp3`, or `justwav` also
+need yt-dlp. RMBG may need ONNX Runtime and its model. JustTools discovers
+these only when needed.
+
+**yt-dlp and FFmpeg download themselves.** When either is missing from `PATH`,
+the first tool that needs it fetches the vendor's build into a per-user
+JustTools folder, verifies its published SHA-256, and uses it from there. This
+happens without a prompt, in interactive and non-interactive runs alike; it
+changes nothing system-wide and never edits `PATH`. Set
+`JUSTTOOLS_NO_DOWNLOAD=1` when the user does not want that, and tell the user
+when a first run will download (FFmpeg is roughly 35 to 115 MB).
+
+Every other dependency still asks for interactive confirmation before it is
+installed or downloaded. JustRMBG's
 launcher is explicit about the exception: its one-run **Install dependencies**
 row emits `--download`, so choosing Run grants that verified managed download
 without a second prompt. A headless run must pass `--download` explicitly.
@@ -65,9 +77,9 @@ installer and may surface UAC or `sudo` prompts.
   `--download` only when the user has authorized its pinned runtime/model.
 - `--yes` approves the requested file operation; it does not approve third-party
   dependency installation.
-- An agent's non-interactive process will intentionally refuse acquisition
-  unless the user explicitly authorized JustRMBG's `--download`. If another
-  dependency is missing, show the exact command/source JustTools reports and
+- Apart from yt-dlp and FFmpeg, an agent's non-interactive process will
+  intentionally refuse acquisition unless the user explicitly authorized
+  JustRMBG's `--download`. If another dependency is missing, show the exact command/source JustTools reports and
   ask the user to run or approve it in an interactive terminal.
 - Explicit `*_BIN`, `RMBG_MODEL`, and `ORT_DYLIB_PATH` overrides are resolve-only;
   do not replace them without checking the user's environment. `ORT_DYLIB_PATH`
@@ -88,6 +100,12 @@ installer and may surface UAC or `sudo` prompts.
   only when the user requested them; never substitute them for ordinary CLI
   invocations just to avoid an approval prompt. All additional arguments pass
   through, and neither shortcut stores a permission bypass in JustTools defaults.
+- An `http(s)` input to `justvideo`, `justaudio`, `justmp3`, or `justwav`
+  reaches the network: it downloads the media with yt-dlp. Every run of those
+  tools and of `justpaste` also runs `yt-dlp --update` once twelve hours have
+  passed since the last update. Pass only a URL the user supplied,
+  and use `--dry-run` to show the plan without downloading. `--playlist`
+  downloads every entry of a playlist link, so add it only when asked.
 - Prefer `--output DIR` when the user wants copies.
 - Use `--replace` only with clear authorization; outputs are installed atomically.
 - Keep `justresize`'s no-upscale default unless enlargement is explicitly wanted.
@@ -100,6 +118,11 @@ installer and may surface UAC or `sudo` prompts.
 - Do not kill a port owner without identifying it first. `justport --kill`
   intentionally limits termination to same-user processes and revalidates the
   process identity.
+- `justip` contacts a third-party echo service and therefore discloses the
+  machine's public address to it. It is read-only and writes nothing, but do
+  not run it on a user's behalf when they have not asked where they appear
+  from. Both families are reported without a switch, so add `-4` or `-6` only
+  to narrow the result.
 - `justports` discovery is read-only until the user explicitly opens, starts,
   or stops a selection. Review remembered start recipes before launching them.
   `K` must remain confirmation-gated and revalidate PID, start time, same-user
@@ -145,7 +168,8 @@ the shared file.
   tables, keep the source, and write `image-optimized.jpg`.
 - `justjpg assets --recursive --output assets-jpg --dry-run`: preview recursive
   JPEG copies in a separate directory while keeping every source file.
-- `just video clip.mov`: streaming-ready 720p H.264 MP4.
+- `just video clip.mov`: streaming-ready 720p H.264 MP4; `--resolution` takes
+  `480p`, `720p`, `1080p`, `1440p`, `4k`, or `source` and never upscales.
 - `just audio clip.mov`: AAC-LC M4A at 160 kb/s.
 - `just qr TEXT`: 1024 px error-Q PNG.
 - `bunt`: interactively inspect, protect, filter, and stop Node/Bun/Python
@@ -166,6 +190,11 @@ the shared file.
   pinned managed runtime/model to install without a second prompt.
 - `justrmbg --check`: test runtime/provider session creation and tiny inference
   without resolving or downloading the BRIA model.
+- `justpaste <url>` / `justpaste --clipboard`: download whatever a link points
+  at, unconverted; pages go through yt-dlp. Never overwrites.
+- `justip`: report the public IPv4 and IPv6 address together; `--plain` and
+  `--json` keep stdout free of anything but the answer, and a family with no
+  public route is reported as unavailable rather than failing the run.
 - `just zip`: archive Git's exact tracked and unignored working-tree files.
 
 Read [references/commands.md](references/commands.md) for the full command map

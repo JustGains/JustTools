@@ -95,12 +95,27 @@ pub fn supports(command: &str) -> bool {
 }
 
 pub fn run(command: &str) -> ToolResult<Option<Vec<OsString>>> {
+    run_with_input(command, "")
+}
+
+/// Open the launcher with its input row already filled in, as the File
+/// Explorer context menu does for the selected files. The row stays editable
+/// and, like every input, is never saved.
+pub fn run_with_input(command: &str, input: &str) -> ToolResult<Option<Vec<OsString>>> {
     let tool = spec(command)
         .ok_or_else(|| ToolError::usage("just", format!("unknown tool: {command}")))?;
     let store = preferences::Store::load().map_err(|error| {
         ToolError::new(command, format!("could not load saved defaults: {error:#}"))
     })?;
     let mut app = App::new(tool, store);
+    if !input.is_empty()
+        && let Some(entry) = app
+            .values
+            .iter_mut()
+            .find(|entry| matches!(entry.field.kind, Kind::Input { .. }))
+    {
+        entry.value = input.to_owned();
+    }
     ratatui::run(|terminal| app.run(terminal))
         .map_err(|error| ToolError::new(command, format!("terminal UI failed: {error}")))?;
     if !app.run {
@@ -544,6 +559,31 @@ impl App {
         format!("{}/{}", absolute.display(), pattern)
     }
 
+    fn has_url(&self) -> bool {
+        split_inputs(self.value("input")).iter().any(|value| {
+            let lower = value.trim().to_ascii_lowercase();
+            lower.starts_with("http://") || lower.starts_with("https://")
+        })
+    }
+
+    /// Downloads have no source folder, so they land in --output or the
+    /// current folder under the title yt-dlp saved.
+    fn download_note(&self, pattern: &str) -> String {
+        if !self.has_url() {
+            return String::new();
+        }
+        let output = self.value("output").trim().to_owned();
+        let directory = if output.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            absolute_path(&output)
+        };
+        format!(
+            " | URL downloads -> {}/{pattern} (yt-dlp)",
+            directory.display()
+        )
+    }
+
     fn output_policy(&self) -> (String, String) {
         let separate_output = !self.value("output").trim().is_empty();
         match self.tool.name {
@@ -676,14 +716,23 @@ impl App {
                         .into(),
                 )
             }
-            "justvideo" => (
+            "justpaste" => (
                 format!(
                     "Output: {}",
+                    self.destination("<the name the link's server gives the file>")
+                        .replace("beside each source as", "the current folder as")
+                ),
+                "Overwrite: never; a taken name is saved as \"name (2).ext\".".into(),
+            ),
+            "justvideo" => (
+                format!(
+                    "Output: {}{}",
                     self.destination(if self.enabled("replace") {
                         "<name>.mp4"
                     } else {
                         "<name>-web.mp4"
-                    })
+                    }),
+                    self.download_note("<title> [<id>].mp4")
                 ),
                 if self.enabled("replace") && !separate_output {
                     "Overwrite: source replaced/removed only after the MP4 is safely installed."
@@ -700,8 +749,9 @@ impl App {
                 };
                 (
                     format!(
-                        "Output: {}",
-                        self.destination(&format!("<name>.{extension}"))
+                        "Output: {}{}",
+                        self.destination(&format!("<name>.{extension}")),
+                        self.download_note(&format!("<title> [<id>].{extension}"))
                     ),
                     if self.enabled("replace") && !separate_output {
                         "Overwrite: source replaced/removed only after safe output installation."
@@ -1011,7 +1061,7 @@ fn split_inputs(value: &str) -> Vec<String> {
     result
 }
 
-fn quote(value: &str) -> String {
+pub(crate) fn quote(value: &str) -> String {
     if !value.is_empty()
         && value
             .chars()
@@ -1295,11 +1345,25 @@ fn media_spec(name: &'static str) -> Tool {
             "Create streaming-ready video",
             vec![
                 input(
-                    "Input files / folders",
-                    "Use semicolons between multiple inputs. Blank processes the current folder.",
+                    "Input files / folders / URLs",
+                    "Use semicolons between multiple inputs. An http(s) URL downloads with yt-dlp. Blank processes the current folder.",
                     true,
                     Some("."),
                     false,
+                ),
+                choices(
+                    "resolution",
+                    "Max resolution",
+                    "Largest output frame. Smaller sources are never upscaled.",
+                    "720",
+                    vec![
+                        choice("480p", "480", &["--resolution", "480p"]),
+                        choice("720p", "720", &[]),
+                        choice("1080p", "1080", &["--resolution", "1080p"]),
+                        choice("1440p", "1440", &["--resolution", "1440p"]),
+                        choice("4K (2160p)", "2160", &["--resolution", "4k"]),
+                        choice("Source", "source", &["--resolution", "source"]),
+                    ],
                 ),
                 number(
                     "crf",
@@ -1334,6 +1398,13 @@ fn media_spec(name: &'static str) -> Tool {
                     "--replace",
                     true,
                 ),
+                toggle(
+                    "playlist",
+                    "Download playlists",
+                    "Download every entry when an input URL is a playlist.",
+                    "--playlist",
+                    true,
+                ),
             ],
             jobs(2),
         ),
@@ -1342,8 +1413,8 @@ fn media_spec(name: &'static str) -> Tool {
             "Create compact AAC audio",
             vec![
                 input(
-                    "Input files / folders",
-                    "Use semicolons between multiple inputs. Blank processes the current folder.",
+                    "Input files / folders / URLs",
+                    "Use semicolons between multiple inputs. An http(s) URL downloads with yt-dlp. Blank processes the current folder.",
                     true,
                     Some("."),
                     false,
@@ -1380,6 +1451,13 @@ fn media_spec(name: &'static str) -> Tool {
                     "--replace",
                     true,
                 ),
+                toggle(
+                    "playlist",
+                    "Download playlists",
+                    "Download every entry when an input URL is a playlist.",
+                    "--playlist",
+                    true,
+                ),
             ],
             jobs(2),
         ),
@@ -1388,8 +1466,8 @@ fn media_spec(name: &'static str) -> Tool {
             "Create high-quality MP3 audio",
             vec![
                 input(
-                    "Input files / folders",
-                    "Use semicolons between multiple inputs. Blank processes the current folder.",
+                    "Input files / folders / URLs",
+                    "Use semicolons between multiple inputs. An http(s) URL downloads with yt-dlp. Blank processes the current folder.",
                     true,
                     Some("."),
                     false,
@@ -1428,6 +1506,13 @@ fn media_spec(name: &'static str) -> Tool {
                     "--replace",
                     true,
                 ),
+                toggle(
+                    "playlist",
+                    "Download playlists",
+                    "Download every entry when an input URL is a playlist.",
+                    "--playlist",
+                    true,
+                ),
             ],
             jobs(2),
         ),
@@ -1436,8 +1521,8 @@ fn media_spec(name: &'static str) -> Tool {
             "Create editing-ready WAV audio",
             vec![
                 input(
-                    "Input files / folders",
-                    "Use semicolons between multiple inputs. Blank processes the current folder.",
+                    "Input files / folders / URLs",
+                    "Use semicolons between multiple inputs. An http(s) URL downloads with yt-dlp. Blank processes the current folder.",
                     true,
                     Some("."),
                     false,
@@ -1474,6 +1559,13 @@ fn media_spec(name: &'static str) -> Tool {
                     "Remove sources",
                     "Remove each source only after output is safely installed.",
                     "--replace",
+                    true,
+                ),
+                toggle(
+                    "playlist",
+                    "Download playlists",
+                    "Download every entry when an input URL is a playlist.",
+                    "--playlist",
                     true,
                 ),
             ],
@@ -1964,6 +2056,81 @@ fn spec(name: &str) -> Option<Tool> {
                 ),
             ],
         },
+        "justpaste" => Tool {
+            name: "justpaste",
+            title: "JustPaste",
+            summary: "Download whatever a link points at",
+            fields: vec![
+                input(
+                    "Links",
+                    "Use semicolons between several links. Blank pastes the links in the clipboard.",
+                    true,
+                    Some("--clipboard"),
+                    false,
+                ),
+                text(
+                    "output",
+                    "Output folder",
+                    "Optional destination folder. Blank saves into the current folder.",
+                    "",
+                    "--output",
+                    true,
+                ),
+                toggle(
+                    "playlist",
+                    "Download playlists",
+                    "Download every entry when a link is a playlist.",
+                    "--playlist",
+                    true,
+                ),
+                toggle(
+                    "dry_run",
+                    "Dry run",
+                    "List the links without any network access. This one-run safety action is not saved.",
+                    "--dry-run",
+                    false,
+                ),
+            ],
+        },
+        "justip" => Tool {
+            name: "justip",
+            title: "JustIP",
+            summary: "Show the public IP address this machine presents",
+            fields: vec![
+                choices(
+                    "family",
+                    "Address family",
+                    "Both reports IPv4 and IPv6 together; either one narrows the lookup.",
+                    "both",
+                    vec![
+                        choice("Both", "both", &[]),
+                        choice("IPv4 only", "ipv4", &["--ipv4"]),
+                        choice("IPv6 only", "ipv6", &["--ipv6"]),
+                    ],
+                ),
+                choices(
+                    "format",
+                    "Output format",
+                    "Labeled reads best; plain and JSON are for scripts and pipelines.",
+                    "labeled",
+                    vec![
+                        choice("Labeled", "labeled", &[]),
+                        choice("Plain addresses", "plain", &["--plain"]),
+                        choice("JSON", "json", &["--json"]),
+                    ],
+                ),
+                number(
+                    "timeout",
+                    "Timeout (seconds)",
+                    "How long each family's lookup may take before it is reported unavailable.",
+                    5,
+                    "--timeout",
+                    1,
+                    60,
+                    1,
+                ),
+            ],
+        },
         "justport" => Tool {
             name: "justport",
             title: "JustPort",
@@ -2345,9 +2512,53 @@ mod tests {
     }
 
     #[test]
+    fn ip_launcher_defaults_to_both_families_and_narrows_on_request() {
+        let mut app = app_for("justip");
+        // Reporting both families is the default, so the bare command carries
+        // no switch at all.
+        assert_eq!(app.command(), "justip");
+        for (id, value) in [("family", "ipv6"), ("format", "plain"), ("timeout", "20")] {
+            let entry = app
+                .values
+                .iter_mut()
+                .find(|entry| entry.field.id == id)
+                .unwrap();
+            assert!(entry.field.persistent, "{id} should be remembered");
+            entry.value = value.into();
+        }
+        assert_eq!(app.command(), "justip --ipv6 --plain --timeout 20");
+    }
+
+    #[test]
     fn default_jpg_command_is_explicitly_headless() {
         let app = app_for("justjpg");
         assert_eq!(app.command(), "justjpg .");
+    }
+
+    #[test]
+    fn media_launcher_forwards_urls_and_shows_the_download_destination() {
+        let mut app = app_for("justaudio");
+        app.values
+            .iter_mut()
+            .find(|value| value.field.id == "input")
+            .unwrap()
+            .value = "https://example.test/watch?v=1".into();
+        let playlist = app
+            .values
+            .iter_mut()
+            .find(|value| value.field.id == "playlist")
+            .unwrap();
+        assert!(playlist.field.persistent);
+        playlist.value = "true".into();
+        let command = app.command();
+        assert!(
+            command.contains("https://example.test/watch?v=1"),
+            "{command}"
+        );
+        assert!(command.contains("--playlist"), "{command}");
+        let (destination, _) = app.output_policy();
+        assert!(destination.contains("<title> [<id>].m4a"), "{destination}");
+        assert!(destination.contains("yt-dlp"), "{destination}");
     }
 
     #[test]
