@@ -11,12 +11,14 @@ const COMMANDS: &[&str] = &[
     "justbunt",
     "justcommit",
     "justcrop",
+    "justip",
     "justjpg",
     "justjson",
     "justlinks",
     "justmkcd",
     "justmp3",
     "justoptimize",
+    "justpaste",
     "justpdf",
     "justpng",
     "justport",
@@ -223,6 +225,105 @@ fn install_creates_native_aliases_and_backs_up_legacy_scripts() {
         .unwrap();
     assert!(bunt_help.status.success());
     assert!(String::from_utf8_lossy(&bunt_help.stdout).contains("justbunt"));
+}
+
+/// A stand-in for a public address service, so the tests never reach the
+/// network. It answers `connections` requests with the same response.
+fn fake_ip_service(
+    status: &'static str,
+    body: &'static str,
+    connections: usize,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        for _ in 0..connections {
+            let (mut stream, _) = listener.accept().unwrap();
+            // A GET has no body, so its headers are the whole request.
+            // Answering before they arrive would leave the client writing
+            // into a closed socket.
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..count]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    (format!("http://{address}/"), handle)
+}
+
+#[test]
+fn justip_reports_both_families_without_a_switch() {
+    let (ipv4, ipv4_service) = fake_ip_service("200 OK", "203.0.113.7\n", 1);
+    let (ipv6, ipv6_service) = fake_ip_service("200 OK", "2001:db8::7\n", 1);
+    let output = Command::new(binary())
+        .args(["ip", "--json"])
+        .env("JUSTIP_IPV4_URL", &ipv4)
+        .env("JUSTIP_IPV6_URL", &ipv6)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        r#"{"ipv4":"203.0.113.7","ipv6":"2001:db8::7"}"#
+    );
+    ipv4_service.join().unwrap();
+    ipv6_service.join().unwrap();
+}
+
+#[test]
+fn justip_falls_back_and_refuses_an_answer_from_the_wrong_family() {
+    let (failing, failing_service) = fake_ip_service("500 Internal Server Error", "nope", 1);
+    let (working, working_service) = fake_ip_service("200 OK", "203.0.113.7", 1);
+    // The IPv6 service answers with an IPv4 address, which must be discarded
+    // rather than reported under the wrong label.
+    let (confused, confused_service) = fake_ip_service("200 OK", "203.0.113.7", 1);
+    let output = Command::new(binary())
+        .args(["ip", "--plain"])
+        .env("JUSTIP_IPV4_URL", format!("{failing};{working}"))
+        .env("JUSTIP_IPV6_URL", &confused)
+        .output()
+        .unwrap();
+    // One family answering is still an answer, so the run succeeds.
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "203.0.113.7\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("IPv6 unavailable"), "{stderr}");
+    assert!(stderr.contains("wrong address family"), "{stderr}");
+    failing_service.join().unwrap();
+    working_service.join().unwrap();
+    confused_service.join().unwrap();
+}
+
+#[test]
+fn justip_fails_when_no_requested_family_answers() {
+    let (failing, failing_service) = fake_ip_service("500 Internal Server Error", "nope", 1);
+    let output = Command::new(binary())
+        .args(["ip", "-4"])
+        .env("JUSTIP_IPV4_URL", &failing)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no public address available"), "{stderr}");
+    failing_service.join().unwrap();
 }
 
 #[test]
@@ -650,6 +751,8 @@ fn missing_dependency_never_installs_without_a_terminal() {
         .arg("video")
         .arg(&input)
         .env("PATH", &fake_bin)
+        // Without this the missing FFmpeg would simply be downloaded.
+        .env("JUSTTOOLS_NO_DOWNLOAD", "1")
         .env_remove("FFMPEG_BIN")
         .output()
         .unwrap();
@@ -658,6 +761,38 @@ fn missing_dependency_never_installs_without_a_terminal() {
     assert!(error.contains("interactive confirmation"), "{error}");
     assert_eq!(fs::read(&manager).unwrap(), b"must not execute");
     assert!(!directory.path().join("clip-web.mp4").exists());
+}
+
+#[test]
+fn media_url_dry_run_reports_the_download_without_network_access() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = Command::new(binary())
+        .args(["video", "--dry-run", "https://example.test/watch?v=1"])
+        .current_dir(directory.path())
+        .env("PATH", directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report = String::from_utf8_lossy(&result.stdout);
+    assert!(report.contains("1 download(s) with yt-dlp"), "{report}");
+    assert!(
+        report.contains("https://example.test/watch?v=1 -> "),
+        "{report}"
+    );
+    assert!(report.contains("<title> [<id>].mp4"), "{report}");
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn image_tools_refuse_urls_instead_of_reading_them_as_paths() {
+    let result = run(["png", "https://example.test/logo.png"].as_ref());
+    assert_eq!(result.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("reads local files"), "{error}");
 }
 
 #[test]
@@ -1188,4 +1323,338 @@ fn invalid_selector_option_uses_the_standard_usage_exit() {
     let result = run(&["--unknown"]);
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("Try 'just --help'"));
+}
+
+#[test]
+fn context_menu_entries_run_the_same_headless_command_they_show() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("wide photo.png");
+    let unrelated = directory.path().join("notes.txt");
+    image::RgbaImage::from_pixel(1200, 600, image::Rgba([20, 80, 160, 255]))
+        .save(&image)
+        .unwrap();
+    fs::write(&unrelated, "not an image").unwrap();
+    // Explorer hands the selection over in a list file that is consumed.
+    let list = directory.path().join("selection.txt");
+    fs::write(
+        &list,
+        format!("{}\r\n{}\r\n", image.display(), unrelated.display()),
+    )
+    .unwrap();
+
+    let result = Command::new(binary())
+        .args(["context", "run", "resize.1024", "--list"])
+        .arg(&list)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "context run failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains("Headless: justresize --max 1024 'wide photo.png'"),
+        "{stdout}"
+    );
+    assert!(!list.exists(), "the selection list must be consumed");
+    assert!(image.is_file(), "the source must be kept");
+    assert_eq!(
+        image::image_dimensions(directory.path().join("wide photo-resized.png")).unwrap(),
+        (1024, 512)
+    );
+}
+
+#[test]
+fn context_menu_refuses_unknown_entries_and_selections_a_tool_cannot_read() {
+    let unknown = run(&["context", "run", "video.9000", "clip.mp4"]);
+    assert_eq!(unknown.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("unknown context-menu entry"));
+
+    let unreadable = run(&["context", "run", "optimize", "song.mp3"]);
+    assert_eq!(unreadable.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("JustOptimize reads"));
+
+    // Launcher entries are interactive, so they never run without a terminal.
+    let launcher = run(&["context", "run", "video.options", "clip.mp4"]);
+    assert_eq!(launcher.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&launcher.stderr).contains("needs a terminal"));
+
+    let help = run(&["context", "--help"]);
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("just context install"));
+}
+
+#[test]
+fn context_package_layout_is_ready_for_signing() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = directory.path().join("package");
+    let result = Command::new(binary())
+        .args([
+            "context",
+            "package",
+            "--publisher",
+            "CN=Example",
+            "--output",
+        ])
+        .arg(&layout)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let manifest = fs::read_to_string(layout.join("AppxManifest.xml")).unwrap();
+    assert!(manifest.contains(r#"Publisher="CN=Example""#));
+    assert!(manifest.contains(r#"<desktop5:ItemType Type=".mp4">"#));
+    assert!(layout.join("Assets").join("logo-44.png").is_file());
+}
+
+#[test]
+fn video_resolution_is_validated_before_any_file_is_touched() {
+    let directory = tempfile::tempdir().unwrap();
+    let clip = directory.path().join("clip.mp4");
+    fs::write(&clip, b"not really a video").unwrap();
+    let preview = Command::new(binary())
+        .args(["video", "--resolution", "4k", "--dry-run"])
+        .arg(&clip)
+        .output()
+        .unwrap();
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("clip-web.mp4"));
+
+    let invalid = Command::new(binary())
+        .args(["video", "--resolution", "900p", "--dry-run"])
+        .arg(&clip)
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr)
+            .contains("resolution must be 480p, 720p, 1080p, 1440p, 4k, or source")
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn context_menu_registration_is_windows_only() {
+    let result = run(&["context", "install"]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Windows File Explorer"));
+}
+
+/// A stand-in web host for `justpaste`: `/photo` is a JPEG with no extension in
+/// its address, `/post` is a page that declares that photo, and anything else
+/// is missing. It serves until `requests` connections have been answered.
+fn fake_paste_host(requests: usize) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        for _ in 0..requests {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "request ended before its headers");
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
+            let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
+            let (status, kind, body): (&str, &str, Vec<u8>) = match path.as_str() {
+                "/photo" => (
+                    "200 OK",
+                    "image/jpeg",
+                    b"\xff\xd8\xff\xe0 pretend jpeg".to_vec(),
+                ),
+                "/post" => (
+                    "200 OK",
+                    "text/html; charset=utf-8",
+                    b"<html><head><meta property=\"og:image\" content=\"/photo\"></head></html>"
+                        .to_vec(),
+                ),
+                _ => ("404 Not Found", "text/plain", b"missing".to_vec()),
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        }
+    });
+    (format!("http://{address}"), handle)
+}
+
+#[test]
+fn paste_saves_a_direct_file_and_numbers_a_taken_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let (host, server) = fake_paste_host(2);
+    for _ in 0..2 {
+        let result = Command::new(binary())
+            .args(["paste", &format!("{host}/photo")])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "justpaste failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    server.join().unwrap();
+    // The address has no extension, so the content type supplies one.
+    let first = fs::read(directory.path().join("photo.jpg")).unwrap();
+    assert!(first.starts_with(b"\xff\xd8\xff"));
+    assert_eq!(
+        fs::read(directory.path().join("photo (2).jpg")).unwrap(),
+        first
+    );
+    let leftovers: Vec<_> = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".justpaste-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files remain: {leftovers:?}"
+    );
+}
+
+#[test]
+fn paste_falls_back_to_the_media_a_page_declares_when_yt_dlp_is_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("saved");
+    let (host, server) = fake_paste_host(2);
+    let result = Command::new(binary())
+        .args(["paste", "--output"])
+        .arg(&output)
+        .arg(format!("{host}/post"))
+        .env("YTDLP_BIN", "justtools-test-missing-yt-dlp")
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        result.status.success(),
+        "justpaste failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output.join("photo.jpg").is_file());
+}
+
+#[test]
+fn paste_reports_a_dead_link_and_previews_without_the_network() {
+    let directory = tempfile::tempdir().unwrap();
+    let (host, server) = fake_paste_host(1);
+    let dead = Command::new(binary())
+        .args(["paste", &format!("{host}/gone")])
+        .env("YTDLP_BIN", "justtools-test-missing-yt-dlp")
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(dead.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&dead.stderr).contains("could not be fetched"));
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+
+    // No server is listening for this one: a dry run must not connect.
+    let preview = run(&["paste", "--dry-run", "https://example.invalid/clip"]);
+    assert!(preview.status.success());
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("https://example.invalid/clip"));
+
+    let not_a_link = run(&["paste", "clip.mp4"]);
+    assert_eq!(not_a_link.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&not_a_link.stderr).contains("http(s) link"));
+}
+
+/// Downloads the real vendor builds, so it only runs when asked for:
+/// `cargo test --test native_cli managed_downloads -- --ignored`.
+#[test]
+#[ignore = "downloads yt-dlp and FFmpeg from their vendors"]
+fn managed_downloads_fetch_verified_programs_that_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = Command::new(binary())
+        .args(["deps", "fetch", "yt-dlp", "ffmpeg"])
+        .env("JUSTTOOLS_DEPS_DIR", directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let version = Command::new(directory.path().join(executable_name("yt-dlp")))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(version.status.success(), "yt-dlp does not run");
+    let encoders = Command::new(directory.path().join(executable_name("ffmpeg")))
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .unwrap();
+    let encoders = String::from_utf8_lossy(&encoders.stdout).into_owned();
+    for encoder in ["libx264", "libmp3lame", "aac"] {
+        assert!(encoders.contains(encoder), "FFmpeg lacks {encoder}");
+    }
+    let probe = Command::new(directory.path().join(executable_name("ffprobe")))
+        .arg("-version")
+        .output()
+        .unwrap();
+    assert!(probe.status.success(), "ffprobe does not run");
+    let leftovers = fs::read_dir(directory.path())
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".download-")
+        })
+        .count();
+    assert_eq!(leftovers, 0, "temporary downloads remain");
+}
+
+#[test]
+fn deps_fetch_needs_a_program_it_manages() {
+    let nothing = run(&["deps", "fetch"]);
+    assert_eq!(nothing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&nothing.stderr).contains("just deps fetch"));
+    let unmanaged = run(&["deps", "fetch", "git"]);
+    assert_eq!(unmanaged.status.code(), Some(2));
+}
+
+#[test]
+fn a_downloaded_program_is_used_when_path_has_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let managed = directory.path().join("managed");
+    let empty = directory.path().join("empty-path");
+    fs::create_dir(&managed).unwrap();
+    fs::create_dir(&empty).unwrap();
+    // Stand-ins: resolving them is the point, and they fail when run.
+    for name in ["ffmpeg", "ffprobe"] {
+        fs::write(managed.join(executable_name(name)), b"stand-in").unwrap();
+    }
+    let clip = directory.path().join("clip.mp4");
+    fs::write(&clip, b"not decoded before the encoder is checked").unwrap();
+    let result = Command::new(binary())
+        .arg("video")
+        .arg(&clip)
+        .env("PATH", &empty)
+        .env("JUSTTOOLS_DEPS_DIR", &managed)
+        .env("JUSTTOOLS_NO_DOWNLOAD", "1")
+        .env_remove("FFMPEG_BIN")
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&result.stderr);
+    // Reaching the stand-in proves it was resolved; no installer was proposed.
+    assert!(!result.status.success());
+    assert!(!error.contains("interactive confirmation"), "{error}");
+    assert!(!error.contains("proposed command"), "{error}");
 }

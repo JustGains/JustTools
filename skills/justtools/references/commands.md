@@ -14,23 +14,26 @@
 | Optimize PNG | `justpng` | pngquant quality 65-90; same path only when smaller |
 | Convert to WebP | `justwebp` | Blank output removes source only after a smaller WebP is safe |
 | Convert to AVIF | `justavif` | Blank output removes source only after a smaller AVIF is safe |
-| Optimize video | `justvideo` | 720p H.264 MP4, CRF 28, AAC 128 kb/s |
-| Extract/convert audio | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz |
-| Create MP3 | `justmp3` | LAME VBR quality 2, 48 kHz |
+| Optimize video | `justvideo` | 720p H.264 MP4, CRF 28, AAC 128 kb/s; `--resolution` 480p to 4k or source; `http(s)` URLs download with yt-dlp |
+| Extract/convert audio | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; `http(s)` URLs download with yt-dlp |
+| Create MP3 | `justmp3` | LAME VBR quality 2, 48 kHz; `http(s)` URLs download with yt-dlp |
+| Download any link | `justpaste` | A file link is saved as-is; a page goes through yt-dlp at the highest resolution as MP4; never overwrites |
 | Choose the best web image | `justoptimize` | Measure PNG/WebP/JPEG; preserve alpha; keep source |
-| Create WAV | `justwav` | Stereo 16-bit PCM, 48 kHz |
+| Create WAV | `justwav` | Stereo 16-bit PCM, 48 kHz; `http(s)` URLs download with yt-dlp |
 | Work with JSON | `justjson` | Format, validate, query, or minify |
 | Work with PDF | `justpdf` | Inspect, merge, split, extract, rotate, save images, or list unique links |
 | Extract links | `justlinks` | Unique links from PDF, Office, and text files to `links.txt`; `--csv` adds title, file, location, and count |
 | Optimize SVG | `justsvg` | Conservative SVGOMG-style OXVG optimization |
 | Generate QR | `justqr` | 1024 px PNG, error correction Q, four-module margin |
 | Inspect ports | `justport` | Show listener/process ownership; guarded kill is optional |
+| Show the public IP address | `justip` | Report the public IPv4 and IPv6 address together; `-4`/`-6` narrow it |
 | Browse development servers | `justports` | Live smart TUI, automatic saving, and one-key Launch Again recipes |
 | Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to `<name>-nobg.png`; Auto visibly falls back to CPU |
 | Archive a repository | `justzip` | ZIP Git's tracked and unignored file set |
 | Create and enter a directory | `justmkcd` / `mkcd` | Create one directory; enter it through `just init` shell integration |
 | Claude permission-bypass shortcut | `claude_` | Shell function for `claude --dangerously-skip-permissions`, forwarding arguments |
 | Codex permission-bypass shortcut | `codex_` | Shell function for `codex --yolo`, forwarding arguments |
+| Windows right-click menu | `just context install` | Per-user File Explorer menu; `status` and `uninstall` manage it |
 
 Every direct alias also works through short dispatch: `just resize`, `just pdf`,
 `just rmbg`, and so on.
@@ -127,6 +130,28 @@ recipe from its original directory. Commands containing likely credentials or
 opaque tokens are not cached. Use `justport` instead when exact-port ownership
 from scripts is the goal; `K` provides confirmation-gated termination for the
 selected Running Now service.
+
+## Public IP examples
+
+```sh
+justip
+justip -4
+justip -6
+justip --plain
+justip --json
+justip --timeout 15
+just ip
+```
+
+Both families are reported without a switch, so `-4` and `-6` are only needed
+to narrow the result. The address is echoed back by a public lookup service, so
+it is what the internet sees rather than a local interface address; each family
+is pinned by hostname and an answer in the wrong family is discarded. A family
+with no globally routable source address is reported as unavailable immediately
+instead of waiting out the timeout, and one family answering still succeeds.
+The run fails, with exit status 1 and nothing on stdout, only when no requested
+family answers. `--plain` and `--json` keep stdout free of anything but the
+answer.
 
 ## Commit examples
 
@@ -239,6 +264,76 @@ Use the command-specific help because not every option applies to every tool.
 `--output` generally keeps sources. `--replace` is explicit and destructive.
 The launchers keep the resolved output pattern and overwrite/source policy
 visible above the Headless command.
+
+## Video resolution
+
+```sh
+justvideo clip.mov                       # 720p
+justvideo clip.mov --resolution 1080p
+justvideo clip.mov --resolution 4k       # 2160p
+justvideo clip.mov --resolution source   # keep the source size
+```
+
+`--resolution` accepts `480p`, `720p`, `1080p`, `1440p`, `4k`, or `source` and
+bounds the frame without ever upscaling. The output name stays `<name>-web.mp4`.
+
+## Windows context menu
+
+```powershell
+just context install
+just context status
+just context uninstall
+```
+
+Adds a per-user **JustTools** entry to File Explorer for supported files and
+folders. Entries run built-in defaults in a console window that prints the
+Headless command; `…` entries open the launcher with the selection filled in.
+The top-level Windows 11 menu needs a signed `justtools-shell.msix` or Developer
+Mode; `--classic` registers under "Show more options". `just context run` is
+the entry point Explorer uses and is not meant to be typed. See
+`docs/context-menu.md`.
+
+## Media download examples
+
+```sh
+just video https://example.com/watch?v=ID
+just audio https://example.com/watch?v=ID --output podcasts
+just mp3 --playlist https://example.com/list=ID
+just video --dry-run https://example.com/watch?v=ID
+```
+
+`justvideo`, `justaudio`, `justmp3`, and `justwav` accept an `http(s)` URL
+wherever they accept a file. yt-dlp downloads it to a temporary folder (best
+video plus audio at 1080p or lower, or at a larger `--resolution`, for video; best audio-only stream otherwise)
+and the tool then encodes it with its usual settings into the current folder, or
+`--output`, as `<title> [<id>].<ext>`. The download is never kept, so `--replace`
+has nothing to remove. A playlist link downloads one entry unless `--playlist`
+is passed, and `--dry-run` reports the plan without any network access. yt-dlp
+runs with `--ignore-config`. Every run of these tools and of `justpaste` runs
+`yt-dlp --update` once twelve hours have passed; an update failure is a
+warning, never a failed run. A missing yt-dlp or FFmpeg is downloaded
+automatically into a per-user folder and verified against the vendor's SHA-256
+(`JUSTTOOLS_NO_DOWNLOAD=1` disables this; `just deps fetch yt-dlp ffmpeg`
+does it up front). See `docs/downloads.md`.
+
+## Paste a link
+
+```sh
+justpaste https://example.com/photo.jpg
+justpaste https://www.youtube.com/watch?v=ID
+justpaste --clipboard
+justpaste -o downloads --dry-run https://example.com/a.pdf
+```
+
+`justpaste` saves what a link points at into the current folder or `--output`.
+A file answer is saved unconverted under the server's name; a page goes to
+yt-dlp (YouTube, TikTok, and most other sites), and if that finds nothing the
+page's declared `og:video`/`og:image` is saved. A taken name becomes
+`name (2).ext`; nothing is overwritten and partial downloads leave nothing
+behind. `--clipboard` takes every link in the copied text, `--playlist` opts
+into multi-entry links, and `--dry-run` makes no request. Use `justvideo` or
+`justmp3` with a URL instead when the result should be converted. See
+`docs/paste.md`.
 
 ## Structured and document examples
 

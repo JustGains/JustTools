@@ -145,8 +145,18 @@ jobs:
       - name: Test every target with real CPU inference
         run: cargo test --locked --workspace --all-targets
 
+      # The vendors' hosts are outside this project's control, so an outage
+      # there is reported here without blocking a build.
+      - name: Download and run the managed yt-dlp and FFmpeg
+        continue-on-error: true
+        run: cargo test --locked --test native_cli managed_downloads -- --ignored
+
       - name: Build release executable
         run: cargo build --locked --release -p justtools
+
+      - name: Build File Explorer extension
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release -p justtools-shell
 
       - name: Check release RMBG CPU inference
         shell: pwsh
@@ -167,12 +177,40 @@ jobs:
       - name: Package Windows artifact
         if: matrix.archive == 'zip'
         shell: pwsh
+        env:
+          JUSTTOOLS_SIGNING_PFX: ${{ secrets.JUSTTOOLS_SIGNING_PFX }}
+          JUSTTOOLS_SIGNING_PASSWORD: ${{ secrets.JUSTTOOLS_SIGNING_PASSWORD }}
         run: |
           $stage = "dist/${{ matrix.artifact }}"
           $archive = "dist/${{ matrix.artifact }}.zip"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/release/${{ matrix.executable }}", README.md, AGENTS.md, LICENSE, THIRD_PARTY_LICENSES.md -Destination $stage
+          Copy-Item "target/release/justtools_shell.dll" -Destination $stage
           Copy-Item docs, skills -Destination $stage -Recurse
+          if ($env:JUSTTOOLS_SIGNING_PFX) {
+            # A signed package identity is what admits the menu to the
+            # top-level Windows 11 context menu without Developer Mode.
+            $kit = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/10.*/x64" -Directory |
+              Where-Object { Test-Path (Join-Path $_.FullName "makeappx.exe") } |
+              Sort-Object Name -Descending | Select-Object -First 1
+            if ($null -eq $kit) { throw "The Windows SDK packaging tools were not found." }
+            $certificate = Join-Path $env:RUNNER_TEMP "justtools-signing.pfx"
+            [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:JUSTTOOLS_SIGNING_PFX))
+            try {
+              $subject = (New-Object Security.Cryptography.X509Certificates.X509Certificate2(
+                $certificate, $env:JUSTTOOLS_SIGNING_PASSWORD)).Subject
+              $layout = Join-Path $env:RUNNER_TEMP "justtools-package"
+              & "target/release/${{ matrix.executable }}" context package --output $layout --publisher $subject
+              if ($LASTEXITCODE -ne 0) { throw "The package layout could not be written." }
+              $package = Join-Path $stage "justtools-shell.msix"
+              & (Join-Path $kit.FullName "makeappx.exe") pack /o /nv /d $layout /p $package
+              if ($LASTEXITCODE -ne 0) { throw "makeappx failed with exit code $LASTEXITCODE" }
+              & (Join-Path $kit.FullName "signtool.exe") sign /fd SHA256 /f $certificate /p $env:JUSTTOOLS_SIGNING_PASSWORD $package
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+            } finally {
+              Remove-Item -LiteralPath $certificate -Force
+            }
+          }
           Compress-Archive -Path "$stage/*" -DestinationPath $archive
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksum = "$hash  $([IO.Path]::GetFileName($archive))`n"
@@ -207,6 +245,11 @@ jobs:
           & ./ready.ps1
           & "$env:JUSTTOOLS_BIN/justready.exe" --help
           & "$env:JUSTTOOLS_BIN/justcommit.exe" --help
+          if (-not (Test-Path -LiteralPath "$env:JUSTTOOLS_BIN/justtools_shell.dll" -PathType Leaf)) {
+            throw "The bootstrap did not install the File Explorer extension."
+          }
+          & "$env:JUSTTOOLS_BIN/just.exe" context status
+          if ($LASTEXITCODE -ne 0) { throw "just context status failed." }
 
       - name: Exercise Unix bootstrap against packaged release
         if: matrix.archive == 'tar.gz'

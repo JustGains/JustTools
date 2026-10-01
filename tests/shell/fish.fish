@@ -1,7 +1,7 @@
 set -l start "$PWD"
 set -gx JUSTTOOLS_MKCD_RESULT previous-value
 mkcd 'my folder [x] café'; or exit 1
-test (path basename "$PWD") = 'my folder [x] café'; or exit 1
+test (basename -- "$PWD") = 'my folder [x] café'; or exit 1
 test "$JUSTTOOLS_MKCD_RESULT" = previous-value; or exit 1
 set -l inside "$PWD"
 mkcd --help >/dev/null; or exit 1
@@ -14,9 +14,9 @@ test "$PWD" = "$inside"; or exit 1
 if mkcd first second; exit 1; end
 test ! -e first; or exit 1
 just mkcd -p parent/child; or exit 1
-test (path basename "$PWD") = child; or exit 1
+test (basename -- "$PWD") = child; or exit 1
 justmkcd -- --literal; or exit 1
-test (path basename "$PWD") = --literal; or exit 1
+test (basename -- "$PWD") = --literal; or exit 1
 cd "$start"
 mkdir stubs
 printf '%s\n' '#!/bin/sh' 'printf "<%s>\n" "$@"' 'exit 19' > stubs/claude

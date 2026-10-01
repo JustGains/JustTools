@@ -1,10 +1,12 @@
 mod commands;
 mod common;
 mod console_ui;
+mod context;
 mod deps;
 mod error;
 mod install;
 mod launcher;
+mod managed;
 mod pathing;
 mod preferences;
 mod selector;

@@ -33,6 +33,9 @@ Windows, macOS, and Linux on x64 and ARM64.
 just                 # browse every tool
 justvideo            # interactive console
 justvideo clip.mov   # direct/headless execution
+justvideo clip.mov --resolution 1080p      # 480p, 720p, 1080p, 1440p, 4k, source
+justaudio https://example.com/watch?v=ID   # yt-dlp download, then convert
+justpaste --clipboard                      # download whatever the copied link is
 justoptimize hero.png --dry-run
 justrmbg portrait.jpg
 ```
@@ -46,11 +49,13 @@ and one-run actions never persist. The bottom line always shows the exact
 | Need | Commands |
 | --- | --- |
 | Images | `justoptimize`, `justcrop`, `justjpg`, `justpng`, `justwebp`, `justavif`, `justresize`, `justrmbg` |
-| Audio and video | `justaudio`, `justmp3`, `justwav`, `justvideo` |
+| Audio and video | `justaudio`, `justmp3`, `justwav`, `justvideo` (also accept `http(s)` URLs) |
+| Downloads | `justpaste` saves any link: a file as-is, a page through yt-dlp |
 | Documents and data | `justjson`, `justpdf`, `justlinks`, `justsvg`, `justqr` |
-| Development | `justports`, `justport`, `bunt`, `justcommit`, `justzip` |
+| Development | `justports`, `justport`, `justip`, `bunt`, `justcommit`, `justzip` |
 | Setup | `justready` |
 | Shell helpers | `mkcd`, `claude_`, `codex_` (automatic in Windows PowerShell) |
+| File Explorer | `just context install` adds a right-click menu on Windows |
 
 Use `<command> --help` for every option. Direct aliases also work as short
 dispatch, such as `just optimize`, `just ports`, and `just rmbg`.
@@ -64,6 +69,29 @@ helpers in Bash/Zsh with
 also creates missing parents. `claude_` runs `claude --dangerously-skip-permissions`
 and `codex_` runs `codex --yolo`, forwarding additional arguments.
 See the [shell helpers guide](docs/mkcd.md).
+
+## Windows right-click menu
+
+`just context install` adds **JustTools** to the File Explorer context menu for
+the current user. Right-click a video for JustVideo at 480p, 720p, 1080p,
+1440p, or 4K and JustMP3/JustAudio/JustWAV; an image for JustOptimize,
+JustResize sizes, WebP/AVIF/JPEG conversion, JustCrop, and JustRMBG; a PDF,
+SVG, JSON file, or document for the tools that read it; and a folder or its
+background for **JustPaste**, which downloads the copied link into it. Each entry
+opens a console showing its **Headless:** command, and sources are kept unless
+an entry says "in place". On Windows 11 the top-level menu needs a signed
+release package or Developer Mode; otherwise the menu sits under "Show more
+options". See the [context menu guide](docs/context-menu.md).
+
+## Media downloads
+
+`justvideo`, `justaudio`, `justmp3`, and `justwav` accept an `http(s)` URL
+wherever they accept a file. yt-dlp downloads it to a temporary folder and the
+tool converts it with its usual settings into the current folder, or `--output`.
+The download is never kept and `--playlist` opts into multi-entry links.
+A missing yt-dlp or FFmpeg is downloaded automatically and verified, and
+yt-dlp is updated whenever twelve hours have passed. See the
+[downloads guide](docs/downloads.md).
 
 ## Safe image output
 
@@ -95,8 +123,9 @@ short, Shorts, live, and embed URLs merge into one clean video link without
 timestamps, tracking, or playlist parameters.
 
 For complete behavior, see the [console UI](docs/console-ui.md),
-[JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustPorts](docs/ports.md), [bunt](docs/bunt.md),
-[JustCommit](docs/commit.md), and [JustReady](docs/ready.md) guides.
+[context menu](docs/context-menu.md), [JustPaste](docs/paste.md), [JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustPorts](docs/ports.md), [JustIP](docs/ip.md),
+[bunt](docs/bunt.md), [JustCommit](docs/commit.md), [media downloads](docs/downloads.md), and
+[JustReady](docs/ready.md) guides.
 
 ## Agent skill
 
@@ -120,10 +149,14 @@ cargo build --locked --release -p justtools
 ./target/release/just install
 ```
 
+On Windows, add `-p justtools-shell` to build the File Explorer extension that
+`just install` copies beside the executable.
+
 Rust 1.90 is the minimum supported toolchain. Version tags build and publish
 checksummed archives for all six supported OS/architecture targets through
 [`native.yml`](.github/workflows/native.yml). Each archive includes the brief
-README, complete guides, screenshots, agent instructions, and installable skill.
+README, complete guides, screenshots, agent instructions, and installable skill;
+Windows archives also carry the File Explorer extension.
 
 MIT licensed. Third-party notices ship in
 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).

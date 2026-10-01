@@ -8,13 +8,16 @@ pub mod bunt;
 pub mod commit;
 mod core_port;
 pub mod crop;
+mod download;
 mod image_ops;
+pub mod ip;
 pub mod jpg;
 pub mod json;
 pub mod links;
 mod media;
 pub mod mkcd;
 pub mod optimize;
+pub mod paste;
 pub mod pdf;
 pub mod png;
 pub mod port;
@@ -56,6 +59,10 @@ pub const COMMANDS: &[CommandInfo] = &[
         description: "trim transparent image borders to their alpha bounds",
     },
     CommandInfo {
+        name: "justip",
+        description: "show the public IPv4 and IPv6 address this machine presents",
+    },
+    CommandInfo {
         name: "justjpg",
         description: "create optimized progressive JPEG files",
     },
@@ -78,6 +85,10 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "justoptimize",
         description: "choose the smallest web-ready PNG, WebP, or JPEG safely",
+    },
+    CommandInfo {
+        name: "justpaste",
+        description: "download whatever a link points at into the current folder",
     },
     CommandInfo {
         name: "justpdf",
@@ -117,7 +128,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "justvideo",
-        description: "optimize videos as streaming-ready 720p H.264 MP4",
+        description: "optimize videos as streaming-ready H.264 MP4 at 480p to 4K",
     },
     CommandInfo {
         name: "justwav",
@@ -151,7 +162,7 @@ pub fn dispatch(command: &str, args: Vec<OsString>) -> ToolResult {
     dispatch_headless(command, args)
 }
 
-fn dispatch_headless(command: &str, args: Vec<OsString>) -> ToolResult {
+pub(crate) fn dispatch_headless(command: &str, args: Vec<OsString>) -> ToolResult {
     match command {
         "justaudio" => audio::run(audio::Mode::Aac, args),
         "justmp3" => audio::run(audio::Mode::Mp3, args),
@@ -161,6 +172,7 @@ fn dispatch_headless(command: &str, args: Vec<OsString>) -> ToolResult {
         "justbunt" => bunt::run(args),
         "justcommit" => commit::run(args),
         "justcrop" => crop::run(args),
+        "justip" => ip::run(args),
         "justjpg" => jpg::run(args),
         "justmkcd" => mkcd::run(args),
         "justpng" => png::run(args),
@@ -169,6 +181,7 @@ fn dispatch_headless(command: &str, args: Vec<OsString>) -> ToolResult {
         "justzip" => zip::run(args),
         "justjson" => json::run(args),
         "justlinks" => links::run(args),
+        "justpaste" => paste::run(args),
         "justpdf" => pdf::run(args),
         "justport" => port::run(args),
         "justports" => ports::run(args),

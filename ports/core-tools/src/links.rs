@@ -568,8 +568,10 @@ fn text_links(text: &str) -> Vec<Found> {
 fn decode_text(bytes: &[u8]) -> Option<String> {
     let utf16 = |bytes: &[u8], from: fn([u8; 2]) -> u16| {
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| from([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| from(*pair))
             .collect();
         String::from_utf16_lossy(&units)
     };

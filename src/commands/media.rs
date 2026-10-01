@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
+use crate::commands::download;
 use crate::common::{self, CollectedPaths, InputOptions, Plan};
 use crate::deps;
 use crate::error::{ToolError, ToolResult};
@@ -91,6 +92,15 @@ impl MediaMode {
     fn is_audio(self) -> bool {
         matches!(self, Self::Audio | Self::Mp3 | Self::Wav)
     }
+    fn download_kind(self) -> Option<download::Kind> {
+        match self {
+            Self::Video => Some(download::Kind::Video {
+                max_height: Some(1080),
+            }),
+            Self::Audio | Self::Mp3 | Self::Wav => Some(download::Kind::Audio),
+            Self::Png | Self::Webp | Self::Avif => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -109,8 +119,11 @@ struct Options {
     crf: u32,
     preset: String,
     audio_bitrate: String,
+    /// Tallest frame the video encode may produce; `None` keeps the source size.
+    resolution: Option<u32>,
     sample_rate: u32,
     bits: u32,
+    playlist: bool,
     inputs: Vec<OsString>,
     help: bool,
 }
@@ -164,20 +177,29 @@ Options:
             mode.default_jobs()
         ),
         MediaMode::Video => format!(
-            r#"justvideo — Optimize videos as streaming-ready 720p H.264 MP4.
+            r#"justvideo — Optimize videos as streaming-ready H.264 MP4.
 
 Usage:
-  justvideo [options] [file-or-folder ...]
+  justvideo [options] [file-or-folder-or-url ...]
 
-Default output is <name>-web.mp4 using CRF 28, x264 medium, AAC 128k.
+Default output is <name>-web.mp4 at 720p using CRF 28, x264 medium, AAC 128k.
+--resolution sets the largest frame; smaller sources are never upscaled.
+
+An http(s) URL is downloaded with yt-dlp (source height capped at 1080p, or at
+a larger --resolution) and then encoded with these same settings to
+`<title> [<id>].mp4` in the current folder, or in --output. The download itself
+is temporary and is never kept. A missing yt-dlp or FFmpeg is downloaded
+automatically, and yt-dlp is updated whenever twelve hours have passed.
 
 Options:
   -f, --replace          Replace sources; non-MP4 sources become <name>.mp4
+      --playlist         Download every entry when a URL is a playlist
   -o, --output DIR       Write outputs to DIR and keep sources
   -j, --jobs N           Parallel encodes (default: {})
   -r, --recursive        Include nested folders
   -y, --yes              Skip folder-scan confirmation
   -n, --dry-run          Preview without changing files
+      --resolution SIZE  480p, 720p, 1080p, 1440p, 4k, or source (default: 720p)
       --crf N            H.264 quality, 0-51 (default: 28)
       --preset NAME      x264 preset (default: medium)
       --audio-bitrate N  AAC bitrate (default: 128k)
@@ -228,12 +250,18 @@ Options:
                 r#"{} — Convert audio or extract it from video.
 
 Usage:
-  {} [options] [file-or-folder ...]
+  {} [options] [file-or-folder-or-url ...]
 
 Default: {description}. Sources are kept.
 
+An http(s) URL is downloaded with yt-dlp and converted with these same settings
+to `<title> [<id>]{}` in the current folder, or in --output. The download itself
+is temporary and is never kept. A missing yt-dlp or FFmpeg is downloaded
+automatically, and yt-dlp is updated whenever twelve hours have passed.
+
 Options:
   -f, --replace          Remove source after output is safely installed
+      --playlist         Download every entry when a URL is a playlist
   -o, --output DIR       Write outputs to DIR and keep sources
   -j, --jobs N           Parallel conversions (default: {})
   -r, --recursive        Include nested folders
@@ -245,6 +273,7 @@ Options:
   -h, --help             Show this help"#,
                 mode.tool(),
                 mode.tool(),
+                mode.target_extension(),
                 mode.default_jobs()
             )
         }
@@ -294,8 +323,10 @@ fn parse(mode: MediaMode, args: Vec<OsString>) -> ToolResult<Options> {
                 "128k".into()
             }
         }),
+        resolution: Some(720),
         sample_rate: 48_000,
         bits: 16,
+        playlist: false,
         inputs: Vec::new(),
         help: false,
     };
@@ -412,6 +443,10 @@ fn parse(mode: MediaMode, args: Vec<OsString>) -> ToolResult<Options> {
                 flag(&inline)?;
                 options.include_target = true;
             }
+            "--playlist" if mode.download_kind().is_some() => {
+                flag(&inline)?;
+                options.playlist = true;
+            }
             "--reencode" if mode.is_audio() => {
                 flag(&inline)?;
                 options.include_target = true;
@@ -429,6 +464,9 @@ fn parse(mode: MediaMode, args: Vec<OsString>) -> ToolResult<Options> {
             "--bitrate" if mode == MediaMode::Audio => {
                 options.audio_bitrate = value(&mut index)?;
                 validate_bitrate(tool, &options.audio_bitrate)?;
+            }
+            "--resolution" if mode == MediaMode::Video => {
+                options.resolution = parse_resolution(tool, &value(&mut index)?)?
             }
             "--crf" if mode == MediaMode::Video => {
                 options.crf = common::integer(tool, &value(&mut index)?, "CRF", 0, 51)?
@@ -522,6 +560,48 @@ fn parse(mode: MediaMode, args: Vec<OsString>) -> ToolResult<Options> {
         }));
     }
     Ok(options)
+}
+
+/// Frame heights `justvideo --resolution` accepts, smallest first.
+const RESOLUTIONS: [u32; 5] = [480, 720, 1080, 1440, 2160];
+
+fn parse_resolution(tool: &str, value: &str) -> ToolResult<Option<u32>> {
+    let lower = value.trim().to_ascii_lowercase();
+    let height = match lower.as_str() {
+        "source" | "original" => return Ok(None),
+        "4k" | "uhd" => Some(2160),
+        "qhd" => Some(1440),
+        other => other.strip_suffix('p').unwrap_or(other).parse::<u32>().ok(),
+    };
+    height
+        .filter(|height| RESOLUTIONS.contains(height))
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::usage(
+                tool,
+                "resolution must be 480p, 720p, 1080p, 1440p, 4k, or source",
+            )
+        })
+}
+
+/// Scale into a 16:9 box of the requested height without ever upscaling;
+/// H.264 4:2:0 needs even dimensions either way.
+fn video_filter(resolution: Option<u32>) -> String {
+    match resolution {
+        Some(height) => {
+            let width = (height * 16 / 9 + 1) & !1;
+            format!(
+                "scale='min({width},iw)':'min({height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p"
+            )
+        }
+        None => "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p".into(),
+    }
+}
+
+/// Downloading more than the encode keeps only costs time, but 1080p is the
+/// floor so smaller targets still downscale from a clean source.
+fn download_height(resolution: Option<u32>) -> Option<u32> {
+    resolution.map(|height| height.max(1080))
 }
 
 fn validate_quality_range(tool: &str, value: &str) -> ToolResult<String> {
@@ -763,23 +843,7 @@ fn dependency_executable(mode: MediaMode) -> ToolResult<PathBuf> {
         MediaMode::Webp => "CWEBP_BIN",
         _ => "FFMPEG_BIN",
     };
-    let Some(requested) = std::env::var_os(variable).filter(|value| !value.is_empty()) else {
-        return deps::require(mode.tool(), mode.dependency());
-    };
-    let path = PathBuf::from(&requested);
-    if path.is_file() {
-        return Ok(path);
-    }
-    let text = requested.to_str().ok_or_else(|| {
-        ToolError::new(
-            mode.tool(),
-            format!(
-                "{variable} points to a missing non-UTF-8 path: {}",
-                path.to_string_lossy()
-            ),
-        )
-    })?;
-    deps::require(mode.tool(), text)
+    deps::require_override(mode.tool(), variable, mode.dependency())
 }
 
 pub(crate) fn animated_png(path: &Path) -> bool {
@@ -1061,27 +1125,154 @@ fn encode(mode: MediaMode, options: &Options, executable: &Path, plan: &Plan) ->
     let source = plan.source.as_os_str().to_owned();
     let target = temporary.as_os_str().to_owned();
     let args: Vec<OsString> = match mode {
-        MediaMode::Png => ["--quality", &options.quality_range, "--speed", &options.speed.to_string(), "--strip", "--skip-if-larger", "--force", "--output"]
-            .into_iter().map(OsString::from).chain([target.clone(), OsString::from("--"), source.clone()]).collect(),
-        MediaMode::Webp => ["-quiet", "-q", &options.quality.to_string(), "-m", &options.method.to_string(), "-mt", "-sharp_yuv", "-metadata", "none"]
-            .into_iter().map(OsString::from).chain([source.clone(), OsString::from("-o"), target.clone()]).collect(),
-        MediaMode::Video => vec!["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"].into_iter().map(OsString::from).chain([source.clone()]).chain([
-            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-sn", "-dn", "-vf", "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuv420p", "-c:v", "libx264", "-preset"
-        ].into_iter().map(OsString::from)).chain([OsString::from(&options.preset), OsString::from("-crf"), OsString::from(options.crf.to_string()), OsString::from("-c:a"), OsString::from("aac"), OsString::from("-b:a"), OsString::from(&options.audio_bitrate), OsString::from("-movflags"), OsString::from("+faststart"), target.clone()]).collect(),
+        MediaMode::Png => [
+            "--quality",
+            &options.quality_range,
+            "--speed",
+            &options.speed.to_string(),
+            "--strip",
+            "--skip-if-larger",
+            "--force",
+            "--output",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .chain([target.clone(), OsString::from("--"), source.clone()])
+        .collect(),
+        MediaMode::Webp => [
+            "-quiet",
+            "-q",
+            &options.quality.to_string(),
+            "-m",
+            &options.method.to_string(),
+            "-mt",
+            "-sharp_yuv",
+            "-metadata",
+            "none",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .chain([source.clone(), OsString::from("-o"), target.clone()])
+        .collect(),
+        MediaMode::Video => vec!["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]
+            .into_iter()
+            .map(OsString::from)
+            .chain([source.clone()])
+            .chain(
+                [
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a:0?",
+                    "-map_metadata",
+                    "-1",
+                    "-sn",
+                    "-dn",
+                    "-vf",
+                ]
+                .into_iter()
+                .map(OsString::from),
+            )
+            .chain([
+                OsString::from(video_filter(options.resolution)),
+                OsString::from("-c:v"),
+                OsString::from("libx264"),
+                OsString::from("-preset"),
+                OsString::from(&options.preset),
+                OsString::from("-crf"),
+                OsString::from(options.crf.to_string()),
+                OsString::from("-c:a"),
+                OsString::from("aac"),
+                OsString::from("-b:a"),
+                OsString::from(&options.audio_bitrate),
+                OsString::from("-movflags"),
+                OsString::from("+faststart"),
+                target.clone(),
+            ])
+            .collect(),
         MediaMode::Avif => {
             let crf = (63.0 - options.quality as f64 * 0.63).round() as u32;
-            vec!["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"].into_iter().map(OsString::from).chain([source.clone()]).chain([
-                "-frames:v", "1", "-map_metadata", "-1", "-an", "-sn", "-dn", "-c:v", "libaom-av1", "-still-picture", "1", "-crf"
-            ].into_iter().map(OsString::from)).chain([OsString::from(crf.to_string()), OsString::from("-cpu-used"), OsString::from(options.speed.to_string()), OsString::from("-row-mt"), OsString::from("1"), OsString::from("-b:v"), OsString::from("0"), OsString::from("-pix_fmt"), OsString::from("yuv420p"), target.clone()]).collect()
+            vec!["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]
+                .into_iter()
+                .map(OsString::from)
+                .chain([source.clone()])
+                .chain(
+                    [
+                        "-frames:v",
+                        "1",
+                        "-map_metadata",
+                        "-1",
+                        "-an",
+                        "-sn",
+                        "-dn",
+                        "-c:v",
+                        "libaom-av1",
+                        "-still-picture",
+                        "1",
+                        "-crf",
+                    ]
+                    .into_iter()
+                    .map(OsString::from),
+                )
+                .chain([
+                    OsString::from(crf.to_string()),
+                    OsString::from("-cpu-used"),
+                    OsString::from(options.speed.to_string()),
+                    OsString::from("-row-mt"),
+                    OsString::from("1"),
+                    OsString::from("-b:v"),
+                    OsString::from("0"),
+                    OsString::from("-pix_fmt"),
+                    OsString::from("yuv420p"),
+                    target.clone(),
+                ])
+                .collect()
         }
         MediaMode::Audio | MediaMode::Mp3 | MediaMode::Wav => {
-            let mut values: Vec<OsString> = ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"].into_iter().map(OsString::from).collect();
+            let mut values: Vec<OsString> =
+                ["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect();
             values.push(source.clone());
-            values.extend(["-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1"].into_iter().map(OsString::from));
+            values.extend(
+                ["-map", "0:a:0", "-vn", "-sn", "-dn", "-map_metadata", "-1"]
+                    .into_iter()
+                    .map(OsString::from),
+            );
             match mode {
-                MediaMode::Audio => values.extend([OsString::from("-c:a"), OsString::from("aac"), OsString::from("-profile:a"), OsString::from("aac_low"), OsString::from("-b:a"), OsString::from(&options.audio_bitrate), OsString::from("-ar"), OsString::from(options.sample_rate.to_string()), OsString::from("-movflags"), OsString::from("+faststart")]),
-                MediaMode::Mp3 => values.extend([OsString::from("-c:a"), OsString::from("libmp3lame"), OsString::from("-q:a"), OsString::from(options.quality.to_string()), OsString::from("-ar"), OsString::from(options.sample_rate.to_string())]),
-                MediaMode::Wav => values.extend([OsString::from("-c:a"), OsString::from(if options.bits == 24 { "pcm_s24le" } else { "pcm_s16le" }), OsString::from("-ar"), OsString::from(options.sample_rate.to_string()), OsString::from("-ac"), OsString::from("2")]),
+                MediaMode::Audio => values.extend([
+                    OsString::from("-c:a"),
+                    OsString::from("aac"),
+                    OsString::from("-profile:a"),
+                    OsString::from("aac_low"),
+                    OsString::from("-b:a"),
+                    OsString::from(&options.audio_bitrate),
+                    OsString::from("-ar"),
+                    OsString::from(options.sample_rate.to_string()),
+                    OsString::from("-movflags"),
+                    OsString::from("+faststart"),
+                ]),
+                MediaMode::Mp3 => values.extend([
+                    OsString::from("-c:a"),
+                    OsString::from("libmp3lame"),
+                    OsString::from("-q:a"),
+                    OsString::from(options.quality.to_string()),
+                    OsString::from("-ar"),
+                    OsString::from(options.sample_rate.to_string()),
+                ]),
+                MediaMode::Wav => values.extend([
+                    OsString::from("-c:a"),
+                    OsString::from(if options.bits == 24 {
+                        "pcm_s24le"
+                    } else {
+                        "pcm_s16le"
+                    }),
+                    OsString::from("-ar"),
+                    OsString::from(options.sample_rate.to_string()),
+                    OsString::from("-ac"),
+                    OsString::from("2"),
+                ]),
                 _ => unreachable!(),
             }
             values.push(target.clone());
@@ -1140,6 +1331,84 @@ fn encode(mode: MediaMode, options: &Options, executable: &Path, plan: &Plan) ->
     Status::Done { before, after }
 }
 
+fn split_inputs(mode: MediaMode, inputs: &[OsString]) -> ToolResult<(Vec<String>, Vec<OsString>)> {
+    let mut urls = Vec::new();
+    let mut paths = Vec::new();
+    for input in inputs {
+        if download::is_url(input) {
+            if mode.download_kind().is_none() {
+                return Err(ToolError::usage(
+                    mode.tool(),
+                    format!(
+                        "{} reads local files; download a URL with justvideo, justaudio, justmp3, or justwav",
+                        mode.tool()
+                    ),
+                ));
+            }
+            urls.push(input.to_string_lossy().trim().to_owned());
+        } else {
+            paths.push(input.clone());
+        }
+    }
+    Ok((urls, paths))
+}
+
+fn download_directory(options: &Options) -> PathBuf {
+    options
+        .output
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Downloads carry no source folder to write beside, so they land in the
+/// current folder (or --output) under the title yt-dlp saved them as. Each
+/// plan is reported against its URL rather than its temporary file.
+fn download_plans(
+    mode: MediaMode,
+    options: &Options,
+    files: Vec<download::Fetched>,
+) -> Vec<(Plan, String)> {
+    let parent = download_directory(options);
+    files
+        .into_iter()
+        .map(|fetched| {
+            let stem = fetched
+                .file
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            (
+                Plan {
+                    output: parent.join(format!("{stem}{}", mode.target_extension())),
+                    source: fetched.file,
+                    output_exists: false,
+                    overwrites_source: false,
+                    removes_source: false,
+                },
+                fetched.url,
+            )
+        })
+        .collect()
+}
+
+fn print_download_dry_run(mode: MediaMode, options: &Options, urls: &[String]) {
+    let parent = download_directory(options);
+    println!(
+        "{}: dry run — {} download(s) with yt-dlp",
+        mode.tool(),
+        urls.len()
+    );
+    for url in urls {
+        println!(
+            "  {url} -> {}",
+            common::display_path(
+                &parent.join(format!("<title> [<id>]{}", mode.target_extension()))
+            )
+        );
+    }
+}
+
 fn print_dry_run(mode: MediaMode, plans: &[Plan]) {
     println!("{}: dry run — {} file(s)", mode.tool(), plans.len());
     for plan in plans.iter().take(100) {
@@ -1182,26 +1451,40 @@ pub fn run(mode: MediaMode, args: Vec<OsString>) -> ToolResult {
         inputs = common::parse_input_lines(&common::read_stdin()?);
         piped = !inputs.is_empty();
     }
-    if inputs.is_empty() {
+    let (urls, mut inputs) = split_inputs(mode, &inputs)?;
+    if inputs.is_empty() && urls.is_empty() {
         inputs.push(
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .into_os_string(),
         );
     }
-    let collected = collect(mode, &options, &inputs)?;
+    let collected = if inputs.is_empty() {
+        CollectedPaths {
+            files: Vec::new(),
+            used_directory: false,
+            warnings: Vec::new(),
+        }
+    } else {
+        collect(mode, &options, &inputs)?
+    };
     for warning in &collected.warnings {
         eprintln!("{}: {warning}", mode.tool());
     }
-    if collected.files.is_empty() {
+    if collected.files.is_empty() && urls.is_empty() {
         return Err(ToolError::new(mode.tool(), "no supported files found"));
     }
     for file in &collected.files {
         assert_safe(mode, file)?;
     }
-    let plans = plans(mode, &options, collected.files)?;
+    let mut plans = plans(mode, &options, collected.files)?;
     if options.dry_run {
-        print_dry_run(mode, &plans);
+        if !plans.is_empty() {
+            print_dry_run(mode, &plans);
+        }
+        if !urls.is_empty() {
+            print_download_dry_run(mode, &options, &urls);
+        }
         return Ok(());
     }
     let destructive = plans
@@ -1222,6 +1505,9 @@ pub fn run(mode: MediaMode, args: Vec<OsString>) -> ToolResult {
     {
         return Err(ToolError::cancelled(mode.tool()));
     }
+    if mode.download_kind().is_some() {
+        download::refresh(mode.tool());
+    }
     let executable = dependency_executable(mode)?;
     verify_ffmpeg_encoder(mode, &options, &executable)?;
     if mode == MediaMode::Avif {
@@ -1231,6 +1517,47 @@ pub fn run(mode: MediaMode, args: Vec<OsString>) -> ToolResult {
             }
         }
     }
+    let mut labels: Vec<String> = plans
+        .iter()
+        .map(|plan| common::display_path(&plan.source))
+        .collect();
+    // The workspace holds every download and is removed with this run.
+    let _workspace = if urls.is_empty() {
+        None
+    } else {
+        let kind = match mode
+            .download_kind()
+            .expect("URLs are rejected for modes that cannot download")
+        {
+            download::Kind::Video { .. } => download::Kind::Video {
+                max_height: download_height(options.resolution),
+            },
+            kind => kind,
+        };
+        let downloader = download::executable(mode.tool())?;
+        download::update(mode.tool(), &downloader);
+        let workspace = tempfile::tempdir().map_err(|error| {
+            ToolError::new(
+                mode.tool(),
+                format!("cannot create a download folder: {error}"),
+            )
+        })?;
+        let files = download::fetch(
+            mode.tool(),
+            kind,
+            &downloader,
+            &executable,
+            &urls,
+            options.playlist,
+            workspace.path(),
+        )?;
+        for (plan, url) in download_plans(mode, &options, files) {
+            plans.push(plan);
+            labels.push(url);
+        }
+        common::validate_plans(mode.tool(), &mut plans)?;
+        Some(workspace)
+    };
     let started = Instant::now();
     println!(
         "{}: {} file(s), {} job(s)",
@@ -1258,15 +1585,11 @@ pub fn run(mode: MediaMode, args: Vec<OsString>) -> ToolResult {
     let mut kept = 0;
     let mut failed = 0;
     let mut warnings = 0;
-    for (plan, status) in plans.iter().zip(&results) {
+    for ((plan, status), source) in plans.iter().zip(&results).zip(&labels) {
         let mapping = if common::same_path(&plan.source, &plan.output) {
-            common::display_path(&plan.source)
+            source.clone()
         } else {
-            format!(
-                "{} -> {}",
-                common::display_path(&plan.source),
-                common::display_path(&plan.output)
-            )
+            format!("{source} -> {}", common::display_path(&plan.output))
         };
         match status {
             Status::Done { before, after } => {
@@ -1279,10 +1602,7 @@ pub fn run(mode: MediaMode, args: Vec<OsString>) -> ToolResult {
             }
             Status::Kept(reason) => {
                 kept += 1;
-                println!(
-                    "  kept    {} ({reason})",
-                    common::display_path(&plan.source)
-                );
+                println!("  kept    {source} ({reason})");
             }
             Status::Warning(error) => {
                 warnings += 1;
@@ -1290,7 +1610,7 @@ pub fn run(mode: MediaMode, args: Vec<OsString>) -> ToolResult {
             }
             Status::Failed(error) => {
                 failed += 1;
-                eprintln!("  failed  {}: {error}", common::display_path(&plan.source));
+                eprintln!("  failed  {source}: {error}");
             }
         }
     }
@@ -1343,6 +1663,35 @@ mod tests {
     }
 
     #[test]
+    fn video_resolution_bounds_the_frame_and_the_download() {
+        let parsed = |value: &str| {
+            parse(MediaMode::Video, vec!["--resolution".into(), value.into()])
+                .map(|options| options.resolution)
+        };
+        assert_eq!(
+            parse(MediaMode::Video, vec![]).unwrap().resolution,
+            Some(720)
+        );
+        assert_eq!(parsed("1080p").unwrap(), Some(1080));
+        assert_eq!(parsed("480").unwrap(), Some(480));
+        assert_eq!(parsed("4K").unwrap(), Some(2160));
+        assert_eq!(parsed("source").unwrap(), None);
+        assert!(parsed("900").unwrap_err().message().contains("resolution"));
+        assert!(parse(MediaMode::Mp3, vec!["--resolution".into(), "720".into()]).is_err());
+
+        assert!(video_filter(Some(480)).starts_with("scale='min(854,iw)':'min(480,ih)'"));
+        assert!(video_filter(Some(720)).starts_with("scale='min(1280,iw)':'min(720,ih)'"));
+        assert!(video_filter(Some(2160)).starts_with("scale='min(3840,iw)':'min(2160,ih)'"));
+        assert_eq!(
+            video_filter(None),
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
+        );
+        assert_eq!(download_height(Some(480)), Some(1080));
+        assert_eq!(download_height(Some(2160)), Some(2160));
+        assert_eq!(download_height(None), None);
+    }
+
+    #[test]
     fn rejects_invalid_quality() {
         let error = parse(MediaMode::Png, vec!["--quality".into(), "90-20".into()]).unwrap_err();
         assert_eq!(error.exit_code(), 2);
@@ -1354,6 +1703,40 @@ mod tests {
         assert!(encoder_available(listing, "libx264"));
         assert!(encoder_available(listing, "aac"));
         assert!(!encoder_available(listing, "x264"));
+    }
+
+    #[test]
+    fn urls_are_separated_from_paths_and_refused_by_image_modes() {
+        let inputs = vec![
+            OsString::from("https://example.test/watch?v=1"),
+            OsString::from("clip.mkv"),
+        ];
+        let (urls, paths) = split_inputs(MediaMode::Video, &inputs).unwrap();
+        assert_eq!(urls, vec!["https://example.test/watch?v=1".to_owned()]);
+        assert_eq!(paths, vec![OsString::from("clip.mkv")]);
+        let error = split_inputs(MediaMode::Png, &inputs).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn downloads_keep_their_saved_title_and_never_remove_a_source() {
+        let options = parse(MediaMode::Video, Vec::new()).unwrap();
+        let plans = download_plans(
+            MediaMode::Video,
+            &options,
+            vec![download::Fetched {
+                url: "https://example.test/watch?v=1".into(),
+                file: PathBuf::from("Great Clip [abc123].mkv"),
+            }],
+        );
+        let (plan, url) = &plans[0];
+        assert_eq!(
+            plan.output.file_name().unwrap(),
+            OsStr::new("Great Clip [abc123].mp4")
+        );
+        assert_eq!(url, "https://example.test/watch?v=1");
+        assert!(!plan.removes_source);
+        assert!(!plan.overwrites_source);
     }
 
     #[test]

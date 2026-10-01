@@ -51,7 +51,8 @@ replaced.
 
 On Windows, also installs PowerShell launchers for mkcd, justmkcd, just,
 claude_, and codex_. Shell integration loads automatically; no init or profile
-edit is needed.
+edit is needed. The File Explorer context-menu extension is installed when it
+sits beside the executable; `just context install` then adds the menu.
 
 Options:
       --bin-dir DIR  Installation directory
@@ -147,12 +148,43 @@ fn native_names() -> Vec<String> {
     command_names().into_iter().map(executable_name).collect()
 }
 
+/// Files a Windows release ships beside `just.exe` for the File Explorer
+/// context menu: the shell extension and, when the release is signed, its
+/// package. Either may be absent, so they are installed only when present.
+const COMPANION_FILES: [&str; 2] = [justtools_menu::SHELL_LIBRARY, "justtools-shell.msix"];
+
+fn companion_files(source: &Path) -> Vec<(&'static str, PathBuf)> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    let Some(directory) = source.parent() else {
+        return Vec::new();
+    };
+    COMPANION_FILES
+        .into_iter()
+        .map(|name| (name, directory.join(name)))
+        .filter(|(_, path)| path.is_file())
+        .collect()
+}
+
 fn installed_names() -> Vec<String> {
     let mut names = native_names();
     names.extend(
         crate::shell::installed_launchers()
             .iter()
             .map(|(name, _)| format!("{name}.ps1")),
+    );
+    names
+}
+
+/// Everything this installation writes: the fixed names plus the companions
+/// found beside `source`.
+fn installed_names_from(source: &Path) -> Vec<String> {
+    let mut names = installed_names();
+    names.extend(
+        companion_files(source)
+            .into_iter()
+            .map(|(name, _)| name.to_owned()),
     );
     names
 }
@@ -248,9 +280,9 @@ fn files_identical(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn manifest_contents() -> String {
+fn manifest_contents(source: &Path) -> String {
     let mut contents = format!("{MANIFEST_HEADER}\n");
-    for name in installed_names() {
+    for name in installed_names_from(source) {
         contents.push_str(&name);
         contents.push('\n');
     }
@@ -258,7 +290,12 @@ fn manifest_contents() -> String {
 }
 
 fn discover_managed_files(source: &Path, bin: &Path) -> ToolResult<Vec<PathBuf>> {
-    let allowed_names: HashSet<_> = installed_names().into_iter().collect();
+    // Companions are always recognized, so an upgrade from a build that had
+    // them to one that lacks them still moves the old ones aside.
+    let allowed_names: HashSet<_> = installed_names()
+        .into_iter()
+        .chain(COMPANION_FILES.map(str::to_owned))
+        .collect();
     let manifest = bin.join(MANIFEST_NAME);
     let mut managed = legacy_files(bin);
 
@@ -290,7 +327,12 @@ fn discover_managed_files(source: &Path, bin: &Path) -> ToolResult<Vec<PathBuf>>
         }
         for name in lines.filter(|name| allowed_names.contains(*name)) {
             let path = bin.join(name);
-            if path.is_file() && !common::same_path(source, &path) {
+            if path.is_file()
+                && !common::same_path(source, &path)
+                && !companion_files(source)
+                    .iter()
+                    .any(|(_, companion)| common::same_path(companion, &path))
+            {
                 managed.push(path);
             }
         }
@@ -315,11 +357,15 @@ fn discover_managed_files(source: &Path, bin: &Path) -> ToolResult<Vec<PathBuf>>
     }
 
     let managed_keys: HashSet<_> = managed.iter().map(|path| path_key(path)).collect();
-    for name in &allowed_names {
+    let incoming: HashSet<_> = installed_names_from(source).into_iter().collect();
+    for name in &incoming {
         let path = bin.join(name);
         if path.exists()
             && !managed_keys.contains(&path_key(&path))
             && !common::same_path(source, &path)
+            && !companion_files(source)
+                .iter()
+                .any(|(_, companion)| common::same_path(companion, &path))
         {
             return Err(ToolError::new(
                 "just",
@@ -462,7 +508,18 @@ fn stage_installation(source: &Path, bin: &Path) -> ToolResult<tempfile::TempDir
             )
         })?;
     }
-    fs::write(stage.path().join(MANIFEST_NAME), manifest_contents())
+    for (name, companion) in companion_files(source) {
+        if common::same_path(&companion, &bin.join(name)) {
+            continue;
+        }
+        fs::copy(&companion, stage.path().join(name)).map_err(|error| {
+            ToolError::new(
+                "just",
+                format!("cannot stage {}: {error}", companion.display()),
+            )
+        })?;
+    }
+    fs::write(stage.path().join(MANIFEST_NAME), manifest_contents(source))
         .map_err(|error| ToolError::new("just", format!("cannot stage manifest: {error}")))?;
     Ok(stage)
 }
@@ -514,14 +571,19 @@ fn install_transaction(
     }
 
     let main_name = executable_name("just");
-    let mut targets = installed_names();
+    let mut targets = installed_names_from(source);
     targets.retain(|name| name != &main_name);
     targets.insert(0, main_name.clone());
     targets.push(MANIFEST_NAME.to_owned());
     let mut committed = Vec::new();
     for name in targets {
         let destination = bin.join(&name);
-        if name == main_name && common::same_path(source, &destination) {
+        if common::same_path(source, &destination)
+            || companion_files(source)
+                .iter()
+                .any(|(_, companion)| common::same_path(companion, &destination))
+        {
+            // Reinstalling from the destination leaves the running files alone.
             continue;
         }
         if fail_after_for_test.is_some_and(|limit| committed.len() >= limit) {
@@ -592,6 +654,17 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             "just: enable shell helpers with just init <powershell|bash|zsh|fish>; see docs/mkcd.md"
         );
     }
+    #[cfg(windows)]
+    {
+        // The registration belongs to the installed copy, which also knows
+        // whether a menu is registered at all.
+        let refreshed = std::process::Command::new(bin.join(executable_name("just")))
+            .args(["context", "refresh"])
+            .status();
+        if !refreshed.is_ok_and(|status| status.success()) {
+            eprintln!("just: run `just context install` to refresh the File Explorer menu");
+        }
+    }
     if options.add_path && !crate::pathing::contains(&bin) {
         let add = options.yes
             || common::confirm("just", &format!("just: add {} to PATH", bin.display()))?;
@@ -609,7 +682,11 @@ mod tests {
     use super::*;
 
     fn write_manifest(bin: &Path) {
-        fs::write(bin.join(MANIFEST_NAME), manifest_contents()).unwrap();
+        fs::write(
+            bin.join(MANIFEST_NAME),
+            manifest_contents(Path::new("downloaded")),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -699,6 +776,39 @@ mod tests {
             );
         }
         assert!(bin.join(MANIFEST_NAME).is_file());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn context_menu_companions_install_and_are_retired_with_the_build_that_had_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let release = directory.path().join("release");
+        let bin = directory.path().join("bin");
+        fs::create_dir(&release).unwrap();
+        fs::create_dir(&bin).unwrap();
+        let source = release.join("just.exe");
+        fs::write(&source, b"native suite").unwrap();
+        fs::write(release.join(justtools_menu::SHELL_LIBRARY), b"extension").unwrap();
+
+        let managed = discover_managed_files(&source, &bin).unwrap();
+        install_transaction(&source, &bin, &managed, None).unwrap();
+        let library = bin.join(justtools_menu::SHELL_LIBRARY);
+        assert_eq!(fs::read(&library).unwrap(), b"extension");
+        assert!(
+            fs::read_to_string(bin.join(MANIFEST_NAME))
+                .unwrap()
+                .contains(justtools_menu::SHELL_LIBRARY)
+        );
+
+        // A later build without the extension must not leave a stale one
+        // serving a menu the new executable no longer matches.
+        let plain = directory.path().join("plain.exe");
+        fs::write(&plain, b"newer suite").unwrap();
+        let managed = discover_managed_files(&plain, &bin).unwrap();
+        assert!(managed.iter().any(|path| common::same_path(path, &library)));
+        install_transaction(&plain, &bin, &managed, None).unwrap();
+        assert!(!library.exists());
+        assert_eq!(fs::read(bin.join("just.exe")).unwrap(), b"newer suite");
     }
 
     #[test]
