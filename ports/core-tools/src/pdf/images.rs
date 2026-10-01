@@ -509,9 +509,11 @@ fn unpack(data: &[u8], row: usize, per_row: usize, height: usize, bits: usize) -
         match bits {
             8 => samples.extend(row[..per_row].iter().map(|byte| u16::from(*byte))),
             16 => samples.extend(
-                row.chunks_exact(2)
+                row.as_chunks::<2>()
+                    .0
+                    .iter()
                     .take(per_row)
-                    .map(|pair| u16::from_be_bytes([pair[0], pair[1]])),
+                    .map(|pair| u16::from_be_bytes(*pair)),
             ),
             _ => {
                 let per_byte = 8 / bits;
@@ -667,7 +669,15 @@ fn decode_raw(
 fn to_gray_or_rgb(color: &Color, values: Vec<u8>) -> (usize, Vec<u8>) {
     match color {
         Color::Gray => (1, values),
-        Color::Cmyk => (3, values.chunks_exact(4).flat_map(cmyk_to_rgb).collect()),
+        Color::Cmyk => (
+            3,
+            values
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|cmyk| cmyk_to_rgb(cmyk))
+                .collect(),
+        ),
         _ => (3, values),
     }
 }
@@ -704,7 +714,7 @@ fn color_key(
         .map(|pixel| {
             let keyed = pixel
                 .iter()
-                .zip(ranges.chunks_exact(2))
+                .zip(ranges.as_chunks::<2>().0)
                 .all(|(sample, range)| (range[0]..=range[1]).contains(&i64::from(*sample)));
             if keyed { 0 } else { 255 }
         })
@@ -738,7 +748,9 @@ fn mask_alpha(
             } else {
                 picture
                     .pixels
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|pixel| pixel[0])
                     .collect()
             };
