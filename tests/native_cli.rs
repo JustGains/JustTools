@@ -39,7 +39,12 @@ fn binary() -> PathBuf {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(binary()).args(args).output().unwrap()
+    Command::new(binary())
+        .args(args)
+        .env("CLOUDFLARE_API_KEY", "")
+        .env("CLOUDFLARE_API_TOKEN", "")
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -1905,6 +1910,8 @@ fn paste_falls_back_to_the_media_a_page_declares_when_yt_dlp_is_unavailable() {
         .arg(&output)
         .arg(format!("{host}/post"))
         .env("YTDLP_BIN", "justtools-test-missing-yt-dlp")
+        .env("CLOUDFLARE_API_KEY", "")
+        .env("CLOUDFLARE_API_TOKEN", "")
         .output()
         .unwrap();
     server.join().unwrap();
@@ -1923,6 +1930,8 @@ fn paste_reports_a_dead_link_and_previews_without_the_network() {
     let dead = Command::new(binary())
         .args(["paste", &format!("{host}/gone")])
         .env("YTDLP_BIN", "justtools-test-missing-yt-dlp")
+        .env("CLOUDFLARE_API_KEY", "")
+        .env("CLOUDFLARE_API_TOKEN", "")
         .current_dir(directory.path())
         .output()
         .unwrap();

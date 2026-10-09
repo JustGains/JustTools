@@ -95,6 +95,16 @@ installer and may surface UAC or `sudo` prompts.
   Wayland or `xclip` on X11 (`xsel` reads only text). Missing helpers explain
   how to use URL arguments, `--copy PATH`, or stdin instead; never install
   these helpers silently. Piped plain text needs `--text`.
+  Public social-profile URLs save the avatar, while post/video URLs keep the
+  media route. With `CLOUDFLARE_API_KEY`/`CLOUDFLARE_API_TOKEN`, generic pages
+  use Cloudflare Browser Run Markdown; `--markdown` forces it and
+  `--profile-photo` chooses a supported public profile. The token needs Browser
+  Rendering - Edit; set `CLOUDFLARE_ACCOUNT_ID` if one account cannot be
+  discovered. Cloudflare receives the page URL. Read credentials from the
+  environment only; never print, persist, or put them in command arguments.
+  For isolated protocol tests, loopback-only `JUSTTOOLS_CLOUDFLARE_TEST_BASE`
+  must use a fixture credential, never the user's real key. Leave public-site
+  authentication and private profile content alone.
   Do not enable copy exclusions silently: they intentionally omit data from
   copies. Preview `--copy PATH --output EXISTING_DIR --dry-run` with the desired
   `--exclude 'node_modules;.cache'` or `--respect-gitignore` options. Never turn

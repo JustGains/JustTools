@@ -11,6 +11,9 @@ controls are Windows-only.
 
 ```sh
 justpaste https://example.com/photo.jpg            # saves photo.jpg
+justpaste https://x.com/Cloudflare                   # public profile photo
+justpaste https://www.facebook.com/cloudflare        # public profile photo
+justpaste --markdown https://example.com             # rendered page as .md
 justpaste https://github.com/owner/repo             # clones into ./repo
 justpaste git@github.com:owner/repo.git -o projects # clones into projects/repo
 justpaste https://www.youtube.com/watch?v=ID       # saves "<title>.mp4"
@@ -150,6 +153,37 @@ folders and playlist choices never redirect Explorer Smart Paste. A playlist
 download remains an explicit CLI/launcher choice.
 
 ## How a link is handled
+
+Public X/Twitter, Facebook, Instagram, and TikTok profile URLs save the profile
+photo before the media downloader is considered. X profile banners are ignored;
+the original avatar is preferred, with the published thumbnail as a fallback.
+Filenames include the site and account, such as `x-Cloudflare-profile.jpg`.
+Image bytes and alpha are retained, and taken names get a number. Post, video,
+and reel URLs keep their existing download behavior. Private/login-only profile
+photos are not retrieved. `--profile-photo` explicitly chooses this route.
+
+When `CLOUDFLARE_API_KEY` or `CLOUDFLARE_API_TOKEN` is available, ordinary HTML
+pages become Markdown through [Cloudflare Browser Run](https://developers.cloudflare.com/browser-run/quick-actions/markdown-endpoint/).
+Direct files, Git repositories, social profile photos, and video pages keep
+their own routes. `--markdown` forces Markdown for a page, including a media or
+profile page. It cannot be combined with `--profile-photo`.
+
+The token needs **Browser Rendering - Edit** permission. Set
+`CLOUDFLARE_ACCOUNT_ID` to select the account, or let JustPaste discover a single
+account through account/zone read access. Several accounts or missing discovery
+permissions require an explicit account ID. `CLOUDFLARE_API_KEY` can also be a
+global API key when `CLOUDFLARE_EMAIL` is supplied; `CLOUDFLARE_API_TOKEN` always
+uses bearer authentication.
+
+Windows user environment values are read when the launching process has not
+inherited them yet. An explicitly empty process value overrides that stored
+value. Credentials remain in memory, are excluded from errors, and never become
+launcher defaults. Cloudflare receives the page URL to render it; the token is
+sent only to Cloudflare. The bare launcher's Markdown and Profile photo rows
+apply to one run. Markdown files use the page title or Markdown title, are
+published atomically, and never overwrite existing files. Empty/error responses
+save nothing. A profile may use Cloudflare's rendered HTML as a fallback when
+public static metadata is absent.
 
 1. **A repository link goes to Git.** Repository homepages on GitHub, GitLab
    (including subgroup paths), Bitbucket, Codeberg, Gitea, SourceHut, and Azure

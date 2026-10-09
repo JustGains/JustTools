@@ -21,8 +21,10 @@ use crate::error::{ToolError, ToolResult};
 
 const TOOL: &str = "justpaste";
 mod clipboard;
+mod cloudflare;
 mod copy;
 mod git;
+mod profile;
 #[cfg(windows)]
 mod windows;
 
@@ -75,6 +77,15 @@ struct Options {
     help: bool,
     settings: Settings,
     copies: Vec<PathBuf>,
+    mode: LinkMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum LinkMode {
+    #[default]
+    Auto,
+    Markdown,
+    ProfilePhoto,
 }
 
 fn help() {
@@ -96,6 +107,16 @@ Azure Repos), http(s) clone links ending in .git, and SSH/git links use git
 clone. The complete checkout lands in a repository-named subfolder, including
 its history and origin. Git must be installed; existing credentials are used.
 
+X/Twitter, Facebook, Instagram, and TikTok profile links save the public
+profile photo. Posts keep their normal media behavior. X avatars use the
+original image when available, with the published thumbnail as a fallback.
+
+With CLOUDFLARE_API_KEY (or CLOUDFLARE_API_TOKEN), ordinary site pages become
+.md files through Cloudflare Browser Run. Videos keep the media downloader;
+--markdown explicitly chooses Markdown. The token needs Browser Rendering - Edit.
+CLOUDFLARE_ACCOUNT_ID selects the account; otherwise a single visible account
+is discovered. Credentials are never saved in defaults or shown in commands.
+
 Names are tidied before saving: emoji, symbols, links, and hashtags are
 dropped, and a long name is cut at a word near 80 characters.
 
@@ -114,6 +135,8 @@ Options:
       --saved-settings      Explicitly use saved copy filters and text setting
   -o, --output DIR    Save into DIR instead of the current folder
       --playlist      Download every entry when a link is a playlist
+      --markdown      Save a page as Markdown through Cloudflare Browser Run
+      --profile-photo Save a supported social profile's photo (posts stay media)
   -n, --dry-run       Show what would be fetched without any network access
   -h, --help          Show this help
 
@@ -156,6 +179,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
             Settings::default()
         },
         copies: Vec::new(),
+        mode: LinkMode::Auto,
     };
     let mut index = 0;
     while index < args.len() {
@@ -164,6 +188,24 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
             "-h" | "--help" => options.help = true,
             "-c" | "--clipboard" => options.clipboard = true,
             "--playlist" => options.playlist = true,
+            "--markdown" => {
+                if options.mode == LinkMode::ProfilePhoto {
+                    return Err(ToolError::usage(
+                        TOOL,
+                        "--markdown and --profile-photo cannot be combined",
+                    ));
+                }
+                options.mode = LinkMode::Markdown;
+            }
+            "--profile-photo" => {
+                if options.mode == LinkMode::Markdown {
+                    return Err(ToolError::usage(
+                        TOOL,
+                        "--markdown and --profile-photo cannot be combined",
+                    ));
+                }
+                options.mode = LinkMode::ProfilePhoto;
+            }
             "--saved-settings" => {}
             "--copy" => {
                 index += 1;
@@ -638,10 +680,25 @@ enum Pasted {
 fn paste(
     agent: &ureq::Agent,
     downloader: &mut Downloader,
+    cloudflare: &mut cloudflare::Client,
     url: &str,
     playlist: bool,
     directory: &Path,
+    mode: LinkMode,
 ) -> Result<Vec<Pasted>, String> {
+    if mode == LinkMode::Markdown {
+        let (path, size) = cloudflare.markdown(url, None, directory)?;
+        return Ok(vec![Pasted::File(path, size)]);
+    }
+    if let Some(profile) = profile::profile(url) {
+        let (path, size) = profile::paste(agent, cloudflare, &profile, directory)?;
+        return Ok(vec![Pasted::File(path, size)]);
+    }
+    if mode == LinkMode::ProfilePhoto {
+        return Err(
+            "--profile-photo needs an X/Twitter, Facebook, Instagram, or TikTok profile URL".into(),
+        );
+    }
     if let Some(repository) = git::repository(url) {
         return git::clone(&repository, directory).map(|path| vec![Pasted::Repository(path)]);
     }
@@ -652,6 +709,13 @@ fn paste(
         Err(_) if !common::interrupted() => None,
         Err(error) => return Err(error),
     };
+    if cloudflare.enabled()
+        && !cloudflare::is_media_page(url, page.as_ref().map(|(html, _)| html.as_str()))
+    {
+        let (path, size) =
+            cloudflare.markdown(url, page.as_ref().map(|(html, _)| html.as_str()), directory)?;
+        return Ok(vec![Pasted::File(path, size)]);
+    }
     let reason = match with_downloader(downloader, url, playlist, directory) {
         Ok(saved) => {
             return Ok(saved
@@ -711,10 +775,14 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         return Ok(());
     }
     if !options.copies.is_empty() {
-        if options.clipboard || !options.inputs.is_empty() || options.playlist {
+        if options.clipboard
+            || !options.inputs.is_empty()
+            || options.playlist
+            || options.mode != LinkMode::Auto
+        {
             return Err(ToolError::usage(
                 TOOL,
-                "--copy cannot be combined with links, --clipboard, or --playlist",
+                "--copy cannot be combined with links, --clipboard, --playlist, or link modes",
             ));
         }
         let output = options.output.unwrap_or_else(|| PathBuf::from("."));
@@ -794,10 +862,28 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         Some(output) => output.clone(),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
+    let mut cloudflare = cloudflare::Client::new();
     if options.dry_run {
         println!("{TOOL}: dry run — {} link(s)", urls.len());
         for url in &urls {
-            if let Some(repository) = git::repository(url) {
+            if options.mode == LinkMode::Markdown {
+                println!(
+                    "  {url} -> {} (Cloudflare Markdown; API key required, no request made)",
+                    common::display_path(&directory)
+                );
+            } else if let Some(profile) = profile::profile(url) {
+                println!(
+                    "  {url} -> {} ({}-{}-profile.<image format>; public profile photo, no overwrite)",
+                    common::display_path(&directory),
+                    profile.site,
+                    profile.name
+                );
+            } else if options.mode == LinkMode::ProfilePhoto {
+                return Err(ToolError::usage(
+                    TOOL,
+                    "--profile-photo needs a supported social profile URL",
+                ));
+            } else if let Some(repository) = git::repository(url) {
                 println!(
                     "  {} -> {} (git clone; full repository, no overwrite)",
                     repository.remote,
@@ -805,8 +891,13 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
                 );
             } else {
                 println!(
-                    "  {url} -> {} (the file itself, or yt-dlp for a page)",
-                    common::display_path(&directory)
+                    "  {url} -> {} ({})",
+                    common::display_path(&directory),
+                    if cloudflare.enabled() {
+                        "direct file, media via yt-dlp, or page as Cloudflare Markdown"
+                    } else {
+                        "the file itself, or yt-dlp for a page"
+                    }
                 );
             }
         }
@@ -818,7 +909,11 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             format!("cannot create {}: {error}", directory.display()),
         )
     })?;
-    if urls.iter().any(|url| git::repository(url).is_none()) {
+    if options.mode != LinkMode::Markdown
+        && urls
+            .iter()
+            .any(|url| git::repository(url).is_none() && profile::profile(url).is_none())
+    {
         download::refresh(TOOL);
     }
     let agent = agent();
@@ -831,7 +926,15 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             break;
         }
         println!("{TOOL}: {url}");
-        match paste(&agent, &mut downloader, url, options.playlist, &directory) {
+        match paste(
+            &agent,
+            &mut downloader,
+            &mut cloudflare,
+            url,
+            options.playlist,
+            &directory,
+            options.mode,
+        ) {
             Ok(files) => {
                 for file in files {
                     match file {
@@ -995,6 +1098,7 @@ fn smart_paste(
         let urls = links(text);
         if !urls.is_empty() {
             let mut downloader = Downloader { resolved: None };
+            let mut cloudflare = cloudflare::Client::new();
             let agent = agent();
             let mut saved = 0;
             let mut cloned = 0;
@@ -1004,7 +1108,15 @@ fn smart_paste(
                         "cancelled; {saved} files saved, {cloned} repositories cloned"
                     ));
                 }
-                for result in paste(&agent, &mut downloader, &url, false, directory)? {
+                for result in paste(
+                    &agent,
+                    &mut downloader,
+                    &mut cloudflare,
+                    &url,
+                    false,
+                    directory,
+                    LinkMode::Auto,
+                )? {
                     match result {
                         Pasted::File(..) => saved += 1,
                         Pasted::Repository(_) => cloned += 1,

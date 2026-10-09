@@ -408,6 +408,12 @@ impl App {
     }
 
     fn validate_tool(&self) -> Result<(), String> {
+        if self.tool.name == "justpaste"
+            && self.enabled("markdown")
+            && self.enabled("profile_photo")
+        {
+            return Err("Choose either Page as Markdown or Profile photo for this paste".into());
+        }
         let integer = |id: &str, label: &str, min: u32, max: u32| -> Result<(), String> {
             let value = self.value(id);
             if value.is_empty() {
@@ -2130,6 +2136,20 @@ fn spec(name: &str) -> Option<Tool> {
                     "",
                     "--output",
                     true,
+                ),
+                toggle(
+                    "markdown",
+                    "Page as Markdown",
+                    "Use Cloudflare Browser Run for this paste. Needs CLOUDFLARE_API_KEY; credentials are never saved. Ordinary pages use it automatically when configured.",
+                    "--markdown",
+                    false,
+                ),
+                toggle(
+                    "profile_photo",
+                    "Profile photo",
+                    "Save a public social-profile photo for this paste. Profile URLs are detected automatically; post URLs keep their media behavior.",
+                    "--profile-photo",
+                    false,
                 ),
                 toggle(
                     "ignore_node_modules",

@@ -1,6 +1,6 @@
 [package]
 name = "justtools"
-version = "2.7.0"
+version = "2.8.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Fast, opinionated, cross-platform just* command-line tools"

@@ -352,12 +352,28 @@ justpaste https://github.com/owner/repo
 justpaste git@github.com:owner/repo.git -o projects
 printf '%s\n' 'Save this text' | justpaste --text -o notes
 justpaste https://www.youtube.com/watch?v=ID
+justpaste https://x.com/Cloudflare
+justpaste https://www.facebook.com/cloudflare
+justpaste --markdown https://example.com
 justpaste --clipboard
 justpaste -o downloads --dry-run https://example.com/a.pdf
 ```
 
 `justpaste` saves what a link points at into the current folder or `--output`.
 The CLI and bare launcher run on Windows, macOS, and Linux x64/ARM64.
+Public X/Twitter, Facebook, Instagram, and TikTok profile URLs save avatars
+under site/account names. X banners are ignored and original avatars preferred;
+private/login-only photos fail clearly. Post/video/reel URLs retain the media
+route. `--profile-photo` explicitly chooses a supported profile URL.
+With `CLOUDFLARE_API_KEY`/`CLOUDFLARE_API_TOKEN`, ordinary pages save as Markdown
+through Cloudflare Browser Run; `--markdown` forces it, including for media or
+profile pages. It is incompatible with `--profile-photo`. The token needs
+Browser Rendering - Edit. `CLOUDFLARE_ACCOUNT_ID` selects the account;
+otherwise account/zone read access must reveal exactly one account.
+Markdown titles determine names, existing names are numbered, and error/empty
+responses leave no file. Windows can read newly set user environment values;
+explicit empty process values disable those fallbacks. Keys are never saved
+in preferences or shown in the headless footer/errors.
 URL arguments and stdin, `--copy PATH`, and piped `--text` need no desktop.
 macOS clipboard reads use the system pasteboard through `osascript`;
 Linux uses `wl-paste` on Wayland or `xclip` on X11 for images/files/text,

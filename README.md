@@ -37,6 +37,8 @@ justvideo clip.mov --resolution 1080p      # 480p, 720p, 1080p, 1440p, 4k, sourc
 justaudio https://example.com/watch?v=ID   # yt-dlp download, then convert
 justpaste --clipboard                      # paste an image, copied files, or links
 justpaste https://github.com/owner/repo      # clone into a repo subfolder
+justpaste https://x.com/Cloudflare           # save the public profile photo
+justpaste --markdown https://example.com    # Cloudflare page as Markdown
 echo 'Save this text' | justpaste --text     # CLI text input on every platform
 just paste --enable                        # Windows: Ctrl+V Smart Paste in Explorer
 justoptimize hero.png --dry-run
@@ -78,6 +80,11 @@ macOS uses its native pasteboard; Linux uses `wl-paste` or `xclip` for images,
 files, and text. Piped URLs/text and explicit file copies work without a
 desktop. Missing yt-dlp and FFmpeg download automatically with vendor SHA-256
 verification; missing Git produces installation guidance. See [JustPaste](docs/paste.md).
+
+Social profile links save public avatars; posts retain their media behavior.
+With `CLOUDFLARE_API_KEY`, ordinary pages save as Markdown through Cloudflare
+Browser Run. The token needs Browser Rendering - Edit; set
+`CLOUDFLARE_ACCOUNT_ID` when account discovery is unavailable or ambiguous.
 
 ## Windows right-click menu
 
