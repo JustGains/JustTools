@@ -35,7 +35,10 @@ justvideo            # interactive console
 justvideo clip.mov   # direct/headless execution
 justvideo clip.mov --resolution 1080p      # 480p, 720p, 1080p, 1440p, 4k, source
 justaudio https://example.com/watch?v=ID   # yt-dlp download, then convert
-justpaste --clipboard                      # download whatever the copied link is
+justpaste --clipboard                      # paste an image, copied files, or links
+justpaste https://github.com/owner/repo      # clone into a repo subfolder
+echo 'Save this text' | justpaste --text     # CLI text input on every platform
+just paste --enable                        # Windows: Ctrl+V Smart Paste in Explorer
 justoptimize hero.png --dry-run
 justrmbg portrait.jpg
 ```
@@ -50,7 +53,7 @@ and one-run actions never persist. The bottom line always shows the exact
 | --- | --- |
 | Images | `justoptimize`, `justcrop`, `justjpg`, `justpng`, `justwebp`, `justavif`, `justresize`, `justrmbg` |
 | Audio and video | `justaudio`, `justmp3`, `justwav`, `justvideo` (also accept `http(s)` URLs) |
-| Downloads | `justpaste` saves any link: a file as-is, a page through yt-dlp |
+| Paste / downloads | `justpaste` saves clipboard images, files, or links and clones Git repos; optional Explorer Ctrl+V mode and copy filters |
 | Documents and data | `justjson`, `justpdf`, `justlinks`, `justsvg`, `justqr` |
 | Development | `justports`, `justport`, `justip`, `bunt`, `justcommit`, `justzip` |
 | Setup | `justready` |
@@ -70,15 +73,41 @@ also creates missing parents. `claude_` runs `claude --dangerously-skip-permissi
 and `codex_` runs `codex --yolo`, forwarding additional arguments.
 See the [shell helpers guide](docs/mkcd.md).
 
+JustPaste's CLI and clipboard support work on Windows, macOS, and Linux.
+macOS uses its native pasteboard; Linux uses `wl-paste` or `xclip` for images,
+files, and text. Piped URLs/text and explicit file copies work without a
+desktop. Missing yt-dlp and FFmpeg download automatically with vendor SHA-256
+verification; missing Git produces installation guidance. See [JustPaste](docs/paste.md).
+
 ## Windows right-click menu
+
+`just paste --enable` also starts a per-user **Smart Paste** tray tool: Ctrl+V
+in Explorer's file pane saves clipboard images as PNG, downloads copied links,
+or clones Git repository links into a repo-named subfolder. Existing names get
+a number; failed clones leave no partial checkout. Git must be installed.
+Tray settings optionally filter file copies by `node_modules`, custom ignored
+names/relative paths, and `.gitignore`. Cut/move stays with Explorer. Start at
+login is optional; the listener survives closing its launching terminal.
+`just paste --disable` stops it. See [JustPaste](docs/paste.md).
+Click its violet-and-blue tray icon, or run `just paste --settings`, for native
+Windows settings with copy filters and sign-in startup. Right-click for quick actions.
+Long pastes show a small progress window with Cancel. yt-dlp is downloaded when
+needed and checked for updates every twelve hours, with earlier retries on failure.
+If Ctrl+V does not produce a file, `just paste --status` shows the last paste
+decision and notification; `just paste --diagnose` checks Explorer connectivity
+without reading clipboard contents. Clipboard PNGs retain their original bytes,
+and Alt+V and pastes in other apps pass through.
 
 `just context install` adds **JustTools** to the File Explorer context menu for
 the current user. Right-click a video for JustVideo at 480p, 720p, 1080p,
 1440p, or 4K and JustMP3/JustAudio/JustWAV; an image for JustOptimize,
 JustResize sizes, WebP/AVIF/JPEG conversion, JustCrop, and JustRMBG; a PDF,
 SVG, JSON file, or document for the tools that read it; and a folder or its
-background for **JustPaste**, which downloads the copied link into it. Each entry
-opens a console showing its **Headless:** command, and sources are kept unless
+background for **JustPaste**, which pastes images, copied files, or links using saved copy filters. All files,
+folders, and mixed selections offer **JustZip** with smallest, balanced, and fast
+compression, a file preview, and more options. Git folders honor ignore rules;
+ordinary folders include their contents recursively. Each entry opens a console
+showing its **Headless:** command, and sources are kept unless
 an entry says "in place". On Windows 11 the top-level menu needs a signed
 release package or Developer Mode; otherwise the menu sits under "Show more
 options". See the [context menu guide](docs/context-menu.md).
@@ -123,7 +152,7 @@ short, Shorts, live, and embed URLs merge into one clean video link without
 timestamps, tracking, or playlist parameters.
 
 For complete behavior, see the [console UI](docs/console-ui.md),
-[context menu](docs/context-menu.md), [JustPaste](docs/paste.md), [JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustPorts](docs/ports.md), [JustIP](docs/ip.md),
+[context menu](docs/context-menu.md), [JustZip](docs/zip.md), [JustPaste](docs/paste.md), [JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustPorts](docs/ports.md), [JustIP](docs/ip.md),
 [bunt](docs/bunt.md), [JustCommit](docs/commit.md), [media downloads](docs/downloads.md), and
 [JustReady](docs/ready.md) guides.
 

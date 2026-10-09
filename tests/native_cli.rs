@@ -834,6 +834,287 @@ fn zip_uses_the_git_file_set_and_writes_a_readable_archive() {
 }
 
 #[test]
+fn zip_archives_ordinary_folders_and_files_without_git() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("plain folder");
+    fs::create_dir_all(source.join("nested/empty")).unwrap();
+    fs::write(source.join("nested/data.bin"), [0, 1, 2, 255]).unwrap();
+    fs::write(source.join(".gitignore"), "*.tmp\n").unwrap();
+    fs::write(source.join("included.tmp"), "ordinary folders include this").unwrap();
+    let run_zip = |args: &[&str]| {
+        let result = Command::new(binary())
+            .current_dir(directory.path())
+            .env("GIT_BIN", directory.path().join("missing-git.exe"))
+            .arg("zip")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        result
+    };
+    run_zip(&["plain folder", "--dry-run"]);
+    let archive_path = directory.path().join("plain folder.zip");
+    assert!(!archive_path.exists());
+    run_zip(&["plain folder"]);
+    let mut archive = zip::ZipArchive::new(fs::File::open(&archive_path).unwrap()).unwrap();
+    assert!(archive.by_name("nested/empty/").unwrap().is_dir());
+    assert!(archive.by_name("included.tmp").is_ok());
+    let mut bytes = Vec::new();
+    archive
+        .by_name("nested/data.bin")
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, [0, 1, 2, 255]);
+    assert_eq!(fs::read(source.join("nested/data.bin")).unwrap(), bytes);
+
+    fs::write(directory.path().join("-README"), "extensionless input").unwrap();
+    run_zip(&["--", "-README"]);
+    let mut archive =
+        zip::ZipArchive::new(fs::File::open(directory.path().join("-README.zip")).unwrap())
+            .unwrap();
+    assert!(archive.by_name("-README").is_ok());
+
+    // A selected ZIP gets another suffix; it never becomes its own output.
+    run_zip(&["plain folder.zip"]);
+    assert!(directory.path().join("plain folder.zip.zip").is_file());
+    assert!(zip::ZipArchive::new(fs::File::open(archive_path).unwrap()).is_ok());
+}
+
+#[test]
+fn context_menu_zip_combines_mixed_selections_into_one_archive() {
+    let directory = tempfile::tempdir().unwrap();
+    let folder = directory.path().join("my files");
+    fs::create_dir_all(folder.join("empty")).unwrap();
+    fs::write(folder.join("one.txt"), "one").unwrap();
+    let file = directory.path().join("-notes.xyz");
+    fs::write(&file, "two").unwrap();
+    let list = directory.path().join("selection.txt");
+    fs::write(&list, format!("{}\n{}\n", folder.display(), file.display())).unwrap();
+    let result = Command::new(binary())
+        .current_dir(&folder)
+        .env("GIT_BIN", directory.path().join("missing-git.exe"))
+        .args(["context", "run", "zip.balanced", "--list"])
+        .arg(&list)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!list.exists());
+    let report = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        report.contains("Headless: justzip --compression balanced 'my files'"),
+        "{report}"
+    );
+    let mut archive =
+        zip::ZipArchive::new(fs::File::open(directory.path().join("archive.zip")).unwrap())
+            .unwrap();
+    assert!(archive.by_name("my files/one.txt").is_ok());
+    assert!(archive.by_name("my files/empty/").unwrap().is_dir());
+    assert!(archive.by_name("-notes.xyz").is_ok());
+    assert!(!folder.join("archive.zip").exists());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "two");
+    assert_eq!(fs::read_to_string(folder.join("one.txt")).unwrap(), "one");
+}
+
+#[test]
+fn zip_rejects_collisions_and_missing_inputs_without_changing_sources_or_output() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["left", "right"] {
+        fs::create_dir(directory.path().join(name)).unwrap();
+        fs::write(directory.path().join(name).join("same.txt"), name).unwrap();
+    }
+    let output = directory.path().join("existing.zip");
+    fs::write(&output, "previous archive").unwrap();
+    for (args, message) in [
+        (
+            vec![
+                "--output",
+                "existing.zip",
+                "left/same.txt",
+                "right/same.txt",
+            ],
+            "conflicting archive name",
+        ),
+        (
+            vec!["--output", "left/same.txt", "left/same.txt"],
+            "replace a selected source",
+        ),
+        (
+            vec!["--output", "existing.zip", "left/same.txt", "missing.txt"],
+            "cannot inspect",
+        ),
+    ] {
+        let result = Command::new(binary())
+            .current_dir(directory.path())
+            .arg("zip")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), "previous archive");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("left/same.txt")).unwrap(),
+            "left"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("right/same.txt")).unwrap(),
+            "right"
+        );
+    }
+    // A file cannot shadow a folder from another selected input.
+    fs::write(directory.path().join("right/left"), "shadow").unwrap();
+    let result = Command::new(binary())
+        .current_dir(directory.path())
+        .args(["zip", "left", "right/left", "--output", "new/output.zip"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("conflicting archive name"));
+    assert!(!directory.path().join("new").exists());
+}
+
+#[test]
+fn zip_honors_nested_repositories_and_git_subfolders() {
+    let directory = tempfile::tempdir().unwrap();
+    let collection = directory.path().join("collection");
+    let repository = collection.join("repository");
+    fs::create_dir_all(repository.join("src")).unwrap();
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&repository)
+        .status();
+    if !initialized.is_ok_and(|status| status.success()) {
+        eprintln!("skipping ZIP integration because Git is unavailable");
+        return;
+    }
+    fs::write(repository.join(".gitignore"), "*.tmp\n").unwrap();
+    fs::write(repository.join("src/keep.txt"), "kept").unwrap();
+    fs::write(repository.join("src/ignored.tmp"), "ignored").unwrap();
+    for (source, output, included, excluded) in [
+        (
+            &collection,
+            "collection.zip",
+            "repository/src/keep.txt",
+            "repository/src/ignored.tmp",
+        ),
+        (
+            &repository.join("src"),
+            "src.zip",
+            "keep.txt",
+            "ignored.tmp",
+        ),
+    ] {
+        let result = Command::new(binary())
+            .current_dir(directory.path())
+            .arg("zip")
+            .arg(source)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let mut archive =
+            zip::ZipArchive::new(fs::File::open(directory.path().join(output)).unwrap()).unwrap();
+        assert!(archive.by_name(included).is_ok());
+        assert!(archive.by_name(excluded).is_err());
+        assert!(archive.file_names().all(|name| !name.contains(".git/")));
+    }
+    // An explicit file is always intentional, even if its repository ignores it.
+    let result = Command::new(binary())
+        .current_dir(directory.path())
+        .arg("zip")
+        .arg(repository.join("src/ignored.tmp"))
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let mut archive =
+        zip::ZipArchive::new(fs::File::open(directory.path().join("ignored.tmp.zip")).unwrap())
+            .unwrap();
+    assert!(archive.by_name("ignored.tmp").is_ok());
+}
+
+#[test]
+#[cfg(any(unix, windows))]
+fn zip_stores_safe_symlinks_and_rejects_escaping_links_before_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("links");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("original.txt"), "original data").unwrap();
+    let link = source.join("link.txt");
+    #[cfg(windows)]
+    let created = std::os::windows::fs::symlink_file("original.txt", &link);
+    #[cfg(unix)]
+    let created = std::os::unix::fs::symlink("original.txt", &link);
+    if let Err(error) = created {
+        #[cfg(windows)]
+        if error.raw_os_error() == Some(1314) {
+            eprintln!("skipping symlink integration without Windows symlink privilege");
+            return;
+        }
+        panic!("cannot create test symlink: {error}");
+    }
+    let result = Command::new(binary())
+        .current_dir(directory.path())
+        .arg("zip")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = directory.path().join("links.zip");
+    let before = fs::read(&output).unwrap();
+    {
+        let mut archive = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+        let mut entry = archive.by_name("link.txt").unwrap();
+        assert_eq!(entry.unix_mode().unwrap() & 0o170000, 0o120000);
+        let mut target = String::new();
+        entry.read_to_string(&mut target).unwrap();
+        assert_eq!(target, "original.txt");
+    }
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file("../outside.txt", source.join("unsafe.txt")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("../outside.txt", source.join("unsafe.txt")).unwrap();
+    let result = Command::new(binary())
+        .current_dir(directory.path())
+        .arg("zip")
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("unsafe symlink"));
+    assert_eq!(fs::read(&output).unwrap(), before);
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("original.txt")).unwrap(),
+        "original data"
+    );
+}
+
+#[test]
 fn resize_preserves_aspect_ratio_and_keeps_the_source() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("wide.png");
@@ -1366,6 +1647,89 @@ fn context_menu_entries_run_the_same_headless_command_they_show() {
 }
 
 #[test]
+fn context_menu_zip_presets_keep_sources_and_preview_without_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("my project");
+    fs::create_dir(&source).unwrap();
+    let initialized = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&source)
+        .status();
+    if !initialized.is_ok_and(|status| status.success()) {
+        eprintln!("skipping ZIP integration because Git is unavailable");
+        return;
+    }
+    fs::write(source.join("keep.txt"), "keep this source\n").unwrap();
+    fs::write(source.join("ignored.tmp"), "keep this ignored source\n").unwrap();
+    fs::write(source.join(".gitignore"), "*.tmp\n").unwrap();
+    let archive_path = directory.path().join("my project.zip");
+    let invoke = |id: &str| {
+        let result = Command::new(binary())
+            .current_dir(&source)
+            .args(["context", "run", id])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap()
+    };
+
+    let preview = invoke("zip.preview");
+    assert!(preview.contains("Headless: justzip --dry-run 'my project'"));
+    assert!(preview.contains("keep.txt"));
+    assert!(!preview.contains("ignored.tmp"));
+    assert!(!archive_path.exists());
+
+    for (id, command) in [
+        ("zip", "justzip 'my project'"),
+        (
+            "zip.balanced",
+            "justzip --compression balanced 'my project'",
+        ),
+        ("zip.fast", "justzip --compression fast 'my project'"),
+    ] {
+        let stdout = invoke(id);
+        assert!(stdout.contains(&format!("Headless: {command}")), "{stdout}");
+        let mut archive = zip::ZipArchive::new(fs::File::open(&archive_path).unwrap()).unwrap();
+        assert_eq!(archive.len(), 2);
+        let mut contents = String::new();
+        archive
+            .by_name("keep.txt")
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert_eq!(contents, "keep this source\n");
+        assert!(archive.by_name(".gitignore").is_ok());
+        assert!(archive.by_name("ignored.tmp").is_err());
+        assert_eq!(
+            fs::read_to_string(source.join("keep.txt")).unwrap(),
+            contents
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("ignored.tmp")).unwrap(),
+            "keep this ignored source\n"
+        );
+        assert!(!source.join("my project.zip").exists());
+    }
+    let previous = fs::read(&archive_path).unwrap();
+    invoke("zip.preview");
+    assert_eq!(fs::read(&archive_path).unwrap(), previous);
+
+    let options = Command::new(binary())
+        .args(["context", "run", "zip.options"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert_eq!(options.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&options.stderr).contains("needs a terminal"));
+    assert_eq!(fs::read(&archive_path).unwrap(), previous);
+}
+
+#[test]
 fn context_menu_refuses_unknown_entries_and_selections_a_tool_cannot_read() {
     let unknown = run(&["context", "run", "video.9000", "clip.mp4"]);
     assert_eq!(unknown.status.code(), Some(2));
@@ -1407,7 +1771,7 @@ fn context_package_layout_is_ready_for_signing() {
     );
     let manifest = fs::read_to_string(layout.join("AppxManifest.xml")).unwrap();
     assert!(manifest.contains(r#"Publisher="CN=Example""#));
-    assert!(manifest.contains(r#"<desktop5:ItemType Type=".mp4">"#));
+    assert!(manifest.contains(r#"<desktop5:ItemType Type="*">"#));
     assert!(layout.join("Assets").join("logo-44.png").is_file());
 }
 
@@ -1467,11 +1831,13 @@ fn fake_paste_host(requests: usize) -> (String, thread::JoinHandle<()>) {
             let request = String::from_utf8_lossy(&request).into_owned();
             let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
             let (status, kind, body): (&str, &str, Vec<u8>) = match path.as_str() {
-                "/photo" => (
-                    "200 OK",
-                    "image/jpeg",
-                    b"\xff\xd8\xff\xe0 pretend jpeg".to_vec(),
-                ),
+                "/photo" => {
+                    let mut bytes = std::io::Cursor::new(Vec::new());
+                    image::RgbImage::from_pixel(3, 2, image::Rgb([20, 100, 180]))
+                        .write_to(&mut bytes, image::ImageFormat::Jpeg)
+                        .unwrap();
+                    ("200 OK", "image/jpeg", bytes.into_inner())
+                }
                 "/post" => (
                     "200 OK",
                     "text/html; charset=utf-8",
@@ -1512,6 +1878,8 @@ fn paste_saves_a_direct_file_and_numbers_a_taken_name() {
     // The address has no extension, so the content type supplies one.
     let first = fs::read(directory.path().join("photo.jpg")).unwrap();
     assert!(first.starts_with(b"\xff\xd8\xff"));
+    let image = image::load_from_memory(&first).unwrap();
+    assert_eq!((image.width(), image.height()), (3, 2));
     assert_eq!(
         fs::read(directory.path().join("photo (2).jpg")).unwrap(),
         first

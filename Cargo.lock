@@ -1287,6 +1287,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1506,6 +1519,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
+name = "ignore"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1658,17 +1687,20 @@ dependencies = [
 
 [[package]]
 name = "justtools"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
  "atomic-write-file",
+ "base64",
  "chrono",
  "crossterm",
  "ctrlc",
  "dialoguer",
  "directories",
+ "embed-resource",
  "flate2",
+ "ignore",
  "image",
  "jpeg-encoder",
  "justtools-core",
@@ -1689,6 +1721,7 @@ dependencies = [
  "ureq",
  "walkdir",
  "webp",
+ "windows",
  "windows-sys 0.61.2",
  "winreg",
  "zip",
@@ -1722,11 +1755,11 @@ dependencies = [
 
 [[package]]
 name = "justtools-menu"
-version = "2.6.0"
+version = "2.7.0"
 
 [[package]]
 name = "justtools-shell"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "embed-resource",
  "justtools-menu",
@@ -3084,9 +3117,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.16"
+version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
 dependencies = [
  "aho-corasick",
  "memchr",

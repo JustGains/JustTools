@@ -4,3 +4,5 @@ dist/
 models/
 skills/*-workspace/
 demo/
+__pycache__/
+*.pyc

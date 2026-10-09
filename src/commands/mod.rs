@@ -88,7 +88,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "justpaste",
-        description: "download whatever a link points at into the current folder",
+        description: "paste clipboard images, files, or links; clone Git repos; Explorer Smart Paste on Windows",
     },
     CommandInfo {
         name: "justpdf",
@@ -140,7 +140,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "justzip",
-        description: "archive a Git working tree while honoring every Git ignore rule",
+        description: "archive files and folders, honoring Git ignore rules in working trees",
     },
 ];
 

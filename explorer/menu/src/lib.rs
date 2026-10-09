@@ -11,6 +11,9 @@ pub const CLASS_ID: &str = "7A1D3C52-6B0E-4E2F-9C41-5D8E2B7F4A10";
 pub const CLASS_ID_VALUE: u128 = 0x7A1D3C52_6B0E_4E2F_9C41_5D8E2B7F4A10;
 /// The extension library `just install` places beside `just.exe`.
 pub const SHELL_LIBRARY: &str = "justtools_shell.dll";
+/// Register once for all files, folders, and folder backgrounds. Per-extension
+/// registrations would duplicate the wildcard's entry for supported media.
+pub const ITEM_TYPES: &[&str] = &["*", "Directory", r"Directory\Background"];
 
 /// A JustTools command the menu can start.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,8 +143,8 @@ impl Tool {
             Tool::Svg => extension == "svg",
             Tool::Json => extension == "json",
             Tool::Links => within(LINK_SOURCES),
-            // Folder tools take the folder itself, never a file in it.
-            Tool::Zip | Tool::Paste => false,
+            Tool::Zip => true,
+            Tool::Paste => false,
         }
     }
 
@@ -160,7 +163,7 @@ pub fn extension(path: &str) -> Option<String> {
     (!stem.is_empty() && !extension.is_empty()).then(|| extension.to_ascii_lowercase())
 }
 
-/// Every extension the menu is registered for, sorted and without dots.
+/// Known extensions with specialized actions, sorted and without dots.
 ///
 /// `.ts` and `.mts` are deliberately absent: they are far more often
 /// TypeScript than transport streams.
@@ -179,14 +182,14 @@ pub struct Selection {
     accepted: [u32; Tool::ALL.len()],
     pub files: u32,
     pub folders: u32,
-    /// The only selected folder is a Git working tree.
-    pub git: bool,
     video: u32,
 }
 
 impl Selection {
     pub fn add_file(&mut self, path: &str) {
         self.files += 1;
+        // Every file can be archived, including names without an extension.
+        self.accepted[Tool::Zip.index()] += 1;
         let Some(extension) = extension(path) else {
             return;
         };
@@ -194,15 +197,14 @@ impl Selection {
             self.video += 1;
         }
         for tool in Tool::ALL {
-            if tool.accepts(&extension) {
+            if tool != Tool::Zip && tool.accepts(&extension) {
                 self.accepted[tool.index()] += 1;
             }
         }
     }
 
-    pub fn add_folder(&mut self, git: bool) {
+    pub fn add_folder(&mut self) {
         self.folders += 1;
-        self.git = git && self.folders == 1;
     }
 
     /// How many selected files the tool can read.
@@ -358,6 +360,10 @@ pub fn menu(selection: &Selection) -> Vec<Item> {
     } else if selection.folders > 0 {
         folder_items(selection, &mut items);
     }
+    if selection.files > 0 || selection.folders > 0 {
+        items.push(separator());
+        zip_items(&mut items);
+    }
     let mut items = tidy(items);
     if !items.is_empty() {
         items.push(separator());
@@ -507,11 +513,7 @@ fn file_items(selection: &Selection, items: &mut Vec<Item>) {
 
 fn folder_items(selection: &Selection, items: &mut Vec<Item>) {
     if selection.folders == 1 {
-        items.push(entry(
-            "JustPaste · download the copied link here",
-            Icon::Paste,
-            "paste",
-        ));
+        items.push(entry("JustPaste · paste here", Icon::Paste, "paste"));
         items.push(separator());
         // Each opens the tool's launcher in the folder, where a blank input
         // already means "this folder".
@@ -527,9 +529,22 @@ fn folder_items(selection: &Selection, items: &mut Vec<Item>) {
         }
         items.push(separator());
     }
-    if selection.git {
-        items.push(entry("JustZip · archive Git repository", Icon::Zip, "zip"));
+}
+
+fn zip_items(items: &mut Vec<Item>) {
+    for (label, id) in [
+        ("smallest ZIP (default)", "zip"),
+        ("balanced ZIP", "zip.balanced"),
+        ("fast ZIP", "zip.fast"),
+        ("preview included files", "zip.preview"),
+    ] {
+        items.push(entry(format!("JustZip · {label}"), Icon::Zip, id));
     }
+    items.push(entry(
+        "JustZip · more options…",
+        Icon::Options,
+        "zip.options",
+    ));
 }
 
 /// How a chosen entry starts its tool.
@@ -660,7 +675,14 @@ const ACTIONS: &[Action] = &[
     headless("links.txt", Tool::Links, &[]),
     headless("links.csv", Tool::Links, &["--csv"]),
     headless("zip", Tool::Zip, &[]),
-    headless("paste", Tool::Paste, &["--clipboard"]),
+    headless("zip.balanced", Tool::Zip, &["--compression", "balanced"]),
+    headless("zip.fast", Tool::Zip, &["--compression", "fast"]),
+    Action {
+        hold: true,
+        ..headless("zip.preview", Tool::Zip, &["--dry-run"])
+    },
+    launcher("zip.options", Tool::Zip),
+    headless("paste", Tool::Paste, &["--clipboard", "--saved-settings"]),
     launcher_here("folder.optimize", Tool::Optimize),
     launcher_here("folder.resize", Tool::Resize),
     launcher_here("folder.webp", Tool::Webp),
@@ -728,6 +750,12 @@ mod tests {
                 "JustAudio · extract M4A",
                 "JustWAV · extract WAV",
                 "",
+                "JustZip · smallest ZIP (default)",
+                "JustZip · balanced ZIP",
+                "JustZip · fast ZIP",
+                "JustZip · preview included files",
+                "JustZip · more options…",
+                "",
                 "Open JustTools here",
             ]
         );
@@ -749,6 +777,12 @@ mod tests {
             [
                 "JustAudio · convert to M4A",
                 "JustWAV · convert to WAV",
+                "",
+                "JustZip · smallest ZIP (default)",
+                "JustZip · balanced ZIP",
+                "JustZip · fast ZIP",
+                "JustZip · preview included files",
+                "JustZip · more options…",
                 "",
                 "Open JustTools here",
             ]
@@ -774,6 +808,12 @@ mod tests {
                 "JustJPG · convert to JPEG",
                 "",
                 "JustRMBG · remove background",
+                "",
+                "JustZip · smallest ZIP (default)",
+                "JustZip · balanced ZIP",
+                "JustZip · fast ZIP",
+                "JustZip · preview included files",
+                "JustZip · more options…",
                 "",
                 "Open JustTools here",
             ]
@@ -803,31 +843,74 @@ mod tests {
     }
 
     #[test]
-    fn folders_open_launchers_and_only_git_trees_offer_zip() {
+    fn folders_open_launchers_and_zip_applies_to_every_selection() {
         let mut plain = Selection::default();
-        plain.add_folder(false);
-        assert!(!titles(&menu(&plain)).contains(&"JustZip · archive Git repository"));
+        plain.add_folder();
+        assert_eq!(menu(&plain)[0].title, "JustPaste · paste here");
         assert_eq!(
-            menu(&plain)[0].title,
-            "JustPaste · download the copied link here"
+            action("paste").unwrap().args,
+            ["--clipboard", "--saved-settings"].as_slice()
         );
-        assert_eq!(action("paste").unwrap().args, ["--clipboard"].as_slice());
         assert_eq!(menu(&plain)[2].title, "JustOptimize in this folder…");
         assert_eq!(action("folder.video").unwrap().run, Run::LauncherHere);
 
-        let mut repository = Selection::default();
-        repository.add_folder(true);
-        assert!(titles(&menu(&repository)).contains(&"JustZip · archive Git repository"));
+        let zip_items: Vec<_> = menu(&plain)
+            .into_iter()
+            .filter(|item| item.title.starts_with("JustZip"))
+            .collect();
+        assert_eq!(
+            titles(&zip_items),
+            [
+                "JustZip · smallest ZIP (default)",
+                "JustZip · balanced ZIP",
+                "JustZip · fast ZIP",
+                "JustZip · preview included files",
+                "JustZip · more options…",
+            ]
+        );
+        assert_eq!(
+            ids(&zip_items),
+            [
+                "zip",
+                "zip.balanced",
+                "zip.fast",
+                "zip.preview",
+                "zip.options"
+            ]
+        );
+        assert!(action("zip.preview").unwrap().hold);
+        assert_eq!(action("zip.options").unwrap().run, Run::Launcher);
 
         let mut several = Selection::default();
-        several.add_folder(true);
-        several.add_folder(true);
-        assert!(menu(&several).is_empty());
+        several.add_folder();
+        several.add_folder();
+        let zip_ids = [
+            "zip",
+            "zip.balanced",
+            "zip.fast",
+            "zip.preview",
+            "zip.options",
+            "browse",
+        ];
+        assert_eq!(ids(&menu(&several)), zip_ids);
+        several.add_file("Makefile");
+        assert_eq!(ids(&menu(&several)), zip_ids);
+        assert_eq!(
+            ids(&menu(&selection(&["notes.xyz", "Makefile", ".gitignore"]))),
+            zip_ids
+        );
+        assert_eq!(
+            selection(&["notes.xyz", "Makefile", ".gitignore"]).count(Tool::Zip),
+            3
+        );
     }
 
     #[test]
-    fn unsupported_selections_hide_the_menu() {
-        assert!(menu(&selection(&["notes.xyz", "Makefile"])).is_empty());
+    fn empty_selections_hide_the_menu_and_unknown_files_still_offer_zip() {
+        assert_eq!(
+            menu(&selection(&["notes.xyz", "Makefile"]))[0].title,
+            "JustZip · smallest ZIP (default)"
+        );
         assert!(menu(&Selection::default()).is_empty());
         assert_eq!(extension(r"C:\a.b\file"), None);
         assert_eq!(extension(".gitignore"), None);
@@ -849,13 +932,14 @@ mod tests {
             }
         }
         let mut repository = Selection::default();
-        repository.add_folder(true);
+        repository.add_folder();
         reachable.extend(ids(&menu(&repository)));
 
         assert!(!extensions().contains(&"ts"));
         let mut seen = std::collections::HashSet::new();
         for action in ACTIONS {
             assert!(seen.insert(action.id), "duplicate action {}", action.id);
+            assert!(!action.args.contains(&"--yes"));
             assert!(
                 reachable.contains(action.id),
                 "no menu entry runs {}",

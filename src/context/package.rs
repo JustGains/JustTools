@@ -52,13 +52,10 @@ fn escape(value: &str) -> String {
 
 /// Every Explorer item type the menu attaches to.
 pub fn item_types() -> Vec<String> {
-    let mut types = vec!["Directory".to_owned(), r"Directory\Background".to_owned()];
-    types.extend(
-        menu::extensions()
-            .into_iter()
-            .map(|extension| format!(".{extension}")),
-    );
-    types
+    menu::ITEM_TYPES
+        .iter()
+        .map(|kind| (*kind).to_owned())
+        .collect()
 }
 
 /// The package manifest for this build, signed or registered as `publisher`.
@@ -153,7 +150,7 @@ mod tests {
         let manifest = manifest("CN=Example & Co");
         assert!(manifest.contains(r#"Publisher="CN=Example &amp; Co""#));
         assert!(manifest.contains(&format!(r#"Version="{}.0""#, env!("CARGO_PKG_VERSION"))));
-        assert!(manifest.contains(r#"<desktop5:ItemType Type=".mp4">"#));
+        assert!(manifest.contains(r#"<desktop5:ItemType Type="*">"#));
         assert!(manifest.contains(r#"<desktop5:ItemType Type="Directory\Background">"#));
         assert!(!manifest.contains(r#"Type=".ts""#));
         assert_eq!(

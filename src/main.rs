@@ -9,6 +9,7 @@ mod launcher;
 mod managed;
 mod pathing;
 mod preferences;
+mod progress;
 mod selector;
 mod shell;
 

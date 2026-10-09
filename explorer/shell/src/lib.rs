@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use justtools_menu::{self as menu, Icon, Item, Kind, Selection, Tool};
+use justtools_menu::{self as menu, Icon, Item, Kind, Selection};
 use windows::Win32::Foundation::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, CloseHandle, E_FAIL, E_NOTIMPL, E_POINTER,
     HINSTANCE, HMODULE, MAX_PATH, S_FALSE, S_OK,
@@ -52,7 +52,7 @@ use windows::core::{
 const CLASS_ID: GUID = GUID::from_u128(menu::CLASS_ID_VALUE);
 /// `SID_SFolderView`, the service that yields the folder a view is showing.
 const FOLDER_VIEW_SERVICE: GUID = GUID::from_u128(0xcde725b0_ccc9_4519_917e_325d72fab4ce);
-/// A stat call per item is fine for a handful of unknown names and far too
+/// A stat call per item is fine for a handful of names and far too
 /// slow for a selection of thousands, so only the first few are probed.
 const FOLDER_PROBES: usize = 16;
 
@@ -89,21 +89,15 @@ fn is_directory(path: &str) -> bool {
     attributes != INVALID_FILE_ATTRIBUTES && attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0
 }
 
-fn exists(path: &str) -> bool {
-    unsafe { GetFileAttributesW(&HSTRING::from(path)) != INVALID_FILE_ATTRIBUTES }
-}
-
 /// Reduce the selected paths to what the menu depends on.
 fn summarize(paths: &[String]) -> Selection {
     let mut selection = Selection::default();
     let mut probes = 0;
     for path in paths {
-        let recognized = menu::extension(path)
-            .is_some_and(|extension| Tool::ALL.iter().any(|tool| tool.accepts(&extension)));
-        if !recognized && probes < FOLDER_PROBES {
+        if probes < FOLDER_PROBES {
             probes += 1;
             if is_directory(path) {
-                selection.add_folder(exists(&format!("{path}\\.git")));
+                selection.add_folder();
                 continue;
             }
         }

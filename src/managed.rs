@@ -137,6 +137,13 @@ fn download(
         .call()
         .map_err(|error| format!("cannot download {url}: {error}"))?;
     let source = response.get_uri().to_string();
+    let total = response
+        .headers()
+        .get("content-length")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.parse::<u64>().ok())
+        .filter(|n| *n > 0);
+    let mut received = 0_u64;
     let mut file = tempfile::Builder::new()
         .prefix(".download-")
         .tempfile_in(directory)
@@ -155,6 +162,12 @@ fn download(
             break;
         }
         hasher.update(&buffer[..count]);
+        received += count as u64;
+        crate::progress::report(
+            "Downloading required tools…",
+            format!("{} downloaded", crate::common::format_bytes(received)),
+            total.map(|n| (received.saturating_mul(100) / n).min(100) as u32),
+        );
         file.write_all(&buffer[..count])
             .map_err(|error| format!("cannot write the download: {error}"))?;
     }
@@ -271,6 +284,7 @@ fn fetch_ffmpeg(agent: &ureq::Agent, directory: &Path) -> Result<(), String> {
 
 /// Download `program` into the managed folder, replacing any earlier copy.
 pub fn fetch(tool: &str, program: Program) -> Result<PathBuf, String> {
+    crate::progress::stage(format!("Downloading {}…", program.label()));
     let directory = directory().ok_or("cannot locate a per-user data folder")?;
     fs::create_dir_all(&directory)
         .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;

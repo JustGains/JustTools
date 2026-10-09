@@ -8,6 +8,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::error::{ToolError, ToolResult};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static BACKGROUND: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static BACKGROUND_STOPPING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn shutdown_requested() -> bool {
+    #[cfg(windows)]
+    {
+        BACKGROUND_STOPPING.load(Ordering::SeqCst)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+#[cfg(windows)]
+pub(crate) fn stop_background() {
+    BACKGROUND_STOPPING.store(true, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+pub(crate) fn set_background() {
+    BACKGROUND.store(true, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+pub(crate) fn background() -> bool {
+    BACKGROUND.load(Ordering::SeqCst)
+}
 
 #[derive(Clone, Debug)]
 pub struct InputOptions<'a> {
@@ -37,7 +66,12 @@ pub fn init_signals() {
 }
 
 pub fn interrupted() -> bool {
-    INTERRUPTED.load(Ordering::SeqCst)
+    INTERRUPTED.load(Ordering::SeqCst) || crate::progress::cancelled()
+}
+
+#[cfg(windows)]
+pub(crate) fn set_interrupted(value: bool) {
+    INTERRUPTED.store(value, Ordering::SeqCst);
 }
 
 pub fn os_to_string(tool: &str, value: &OsStr, label: &str) -> ToolResult<String> {
@@ -155,7 +189,7 @@ fn resolve_nearest(path: &Path) -> PathBuf {
     resolved
 }
 
-fn friendly_path_text(path: &Path) -> String {
+pub(crate) fn friendly_path_text(path: &Path) -> String {
     let text = path.to_string_lossy();
     #[cfg(windows)]
     {
@@ -396,6 +430,61 @@ pub fn confirm(tool: &str, question: &str) -> ToolResult<bool> {
     ))
 }
 
+/// Publish a completed directory atomically, including when an empty directory
+/// or dangling link appeared at its destination after planning.
+pub fn rename_directory_noclobber(temporary: &Path, output: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let path = |value: &Path| {
+            CString::new(value.as_os_str().as_bytes())
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+        };
+        let source = path(temporary)?;
+        let target = path(output)?;
+        #[cfg(target_os = "linux")]
+        unsafe extern "C" {
+            fn renameat2(
+                olddirfd: i32,
+                oldpath: *const std::ffi::c_char,
+                newdirfd: i32,
+                newpath: *const std::ffi::c_char,
+                flags: u32,
+            ) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        unsafe extern "C" {
+            fn renamex_np(
+                from: *const std::ffi::c_char,
+                to: *const std::ffi::c_char,
+                flags: u32,
+            ) -> i32;
+        }
+        // Both APIs refuse every existing target. The paths remain alive for
+        // the call; flags are RENAME_NOREPLACE (Linux) / RENAME_EXCL (macOS).
+        #[cfg(target_os = "linux")]
+        let result = unsafe { renameat2(-100, source.as_ptr(), -100, target.as_ptr(), 1) };
+        #[cfg(target_os = "macos")]
+        let result = unsafe { renamex_np(source.as_ptr(), target.as_ptr(), 4) };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        // Windows rename never replaces an existing directory. Check other
+        // entry types too, so files and dangling links also stay intact.
+        match fs::symlink_metadata(output) {
+            Ok(_) => return Err(io::ErrorKind::AlreadyExists.into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(temporary, output)
+    }
+}
+
 pub fn atomic_install(tool: &str, temporary: &Path, output: &Path) -> ToolResult {
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).map_err(|error| ToolError::new(tool, error.to_string()))?;
@@ -462,9 +551,172 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{:.1} {}", value, units[unit.saturating_sub(1)])
 }
 
+const MAX_STEM_CHARS: usize = 80;
+/// Leaves room under the 255-byte limit of most file systems for an
+/// extension, a " (2)" suffix, and a temporary suffix while it is written.
+const MAX_STEM_BYTES: usize = 180;
+
+fn stem_character(character: char) -> char {
+    match character {
+        '\u{2018}' | '\u{2019}' => '\'',
+        '\u{2013}' | '\u{2014}' => '-',
+        '-' | '_' | '.' | ',' | '\'' | '(' | ')' | '&' | '+' => character,
+        character if character.is_alphanumeric() => character,
+        // Accents and vowel signs that complete the letter before them.
+        '\u{0300}'..='\u{036F}' | '\u{0900}'..='\u{0DFF}' | '\u{0E00}'..='\u{0E7F}' => character,
+        _ => ' ',
+    }
+}
+
+fn trim_stem(stem: &str) -> &str {
+    stem.trim_matches([' ', '.', '-', ','])
+}
+
+/// A title or a server-supplied name as a short, plain file stem.
+///
+/// Letters and digits of any script are kept with a little punctuation.
+/// Emoji, symbols, links, and a caption's hashtags are dropped, and a long
+/// name is cut at a word near eighty characters. The result is empty when
+/// nothing usable is left, so the caller chooses the fallback.
+pub fn tidy_stem(raw: &str) -> String {
+    let words: Vec<&str> = raw
+        .split_whitespace()
+        .filter(|word| {
+            let lower = word.to_ascii_lowercase();
+            !(lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || lower.starts_with("www."))
+        })
+        .collect();
+    let join = |hashtags: bool| {
+        let mut joined = String::new();
+        for word in &words {
+            let hashtag = word
+                .strip_prefix('#')
+                .and_then(|tag| tag.chars().next())
+                .is_some_and(char::is_alphabetic);
+            if hashtag && !hashtags {
+                continue;
+            }
+            for character in word.chars().map(stem_character).chain([' ']) {
+                let repeated = matches!(character, ' ' | '.') && joined.ends_with(character);
+                if !repeated {
+                    joined.push(character);
+                }
+            }
+        }
+        trim_stem(&joined).to_owned()
+    };
+    // Hashtags are noise beside a caption, but they are the name when they
+    // are all there is.
+    let mut stem = join(false);
+    if stem.is_empty() {
+        stem = join(true);
+    }
+    let mut end = stem
+        .char_indices()
+        .nth(MAX_STEM_CHARS)
+        .map_or(stem.len(), |(index, _)| index)
+        .min(MAX_STEM_BYTES);
+    if end < stem.len() {
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        // End on a whole word when that keeps most of the name.
+        if !stem[end..].starts_with(' ')
+            && let Some(space) = stem[..end].rfind(' ')
+            && space >= end / 2
+        {
+            end = space;
+        }
+        stem = trim_stem(&stem[..end]).to_owned();
+    }
+    // Windows reserves these device names whatever follows the first dot.
+    let device = stem.split('.').next().unwrap_or_default().trim_end();
+    let reserved = ["con", "prn", "aux", "nul"].contains(&device.to_ascii_lowercase().as_str())
+        || (device.len() == 4
+            && device.get(..3).is_some_and(|port| {
+                port.eq_ignore_ascii_case("com") || port.eq_ignore_ascii_case("lpt")
+            })
+            && device.ends_with(|digit: char| digit.is_ascii_digit()));
+    if reserved {
+        stem.insert(0, '_');
+    }
+    stem
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_publication_is_atomic_and_preserves_existing_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("staged");
+        let target = directory.path().join("published");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("kept"), "checkout").unwrap();
+        fs::create_dir(&target).unwrap();
+        assert!(rename_directory_noclobber(&source, &target).is_err());
+        assert!(source.join("kept").is_file());
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        fs::remove_dir(&target).unwrap();
+        fs::write(&target, "existing file").unwrap();
+        assert!(rename_directory_noclobber(&source, &target).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "existing file");
+        fs::remove_file(&target).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(directory.path().join("missing"), &target).unwrap();
+            assert!(rename_directory_noclobber(&source, &target).is_err());
+            assert!(
+                fs::symlink_metadata(&target)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            fs::remove_file(&target).unwrap();
+        }
+        rename_directory_noclobber(&source, &target).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(target.join("kept")).unwrap(), "checkout");
+    }
+
+    #[test]
+    fn stems_are_short_plain_and_safe_on_every_platform() {
+        assert_eq!(tidy_stem("Me at the zoo"), "Me at the zoo");
+        assert_eq!(
+            tidy_stem("POV: you finally did it 😭😭 #fyp #gym https://t.co/abc"),
+            "POV you finally did it"
+        );
+        assert_eq!(tidy_stem("🔥 #fyp #Leg-Day"), "fyp Leg-Day");
+        assert_eq!(tidy_stem("Track #3 — live"), "Track 3 - live");
+        assert_eq!(
+            tidy_stem("  what?!\r\n<now>  \"then\"...  "),
+            "what now then"
+        );
+        assert_eq!(tidy_stem("Wait... what"), "Wait. what");
+        assert_eq!(tidy_stem("abé1"), "abé1");
+        assert_eq!(tidy_stem("../../etc/passwd"), "etc passwd");
+        assert_eq!(
+            tidy_stem("AC/DC: Rock’n’Roll (Live)"),
+            "AC DC Rock'n'Roll (Live)"
+        );
+        assert_eq!(tidy_stem("naïve café 東京の夜"), "naïve café 東京の夜");
+        assert_eq!(tidy_stem("IMG_1234.final-v2"), "IMG_1234.final-v2");
+        assert_eq!(tidy_stem("😭😭 🔥"), "");
+        assert_eq!(tidy_stem("con"), "_con");
+        assert_eq!(tidy_stem("COM1.backup"), "_COM1.backup");
+        assert_eq!(tidy_stem("console"), "console");
+
+        let long = tidy_stem(&"every word counts ".repeat(20));
+        assert!(long.chars().count() <= MAX_STEM_CHARS, "{long}");
+        assert!(long.ends_with("counts") || long.ends_with("word") || long.ends_with("every"));
+        let unbroken = tidy_stem(&"x".repeat(400));
+        assert_eq!(unbroken.chars().count(), MAX_STEM_CHARS);
+        let wide = tidy_stem(&"東".repeat(400));
+        assert!(wide.len() <= MAX_STEM_BYTES && wide.chars().all(|c| c == '東'));
+    }
 
     #[test]
     fn parses_lines_and_nulls() {

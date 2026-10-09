@@ -17,7 +17,7 @@
 | Optimize video | `justvideo` | 720p H.264 MP4, CRF 28, AAC 128 kb/s; `--resolution` 480p to 4k or source; `http(s)` URLs download with yt-dlp |
 | Extract/convert audio | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; `http(s)` URLs download with yt-dlp |
 | Create MP3 | `justmp3` | LAME VBR quality 2, 48 kHz; `http(s)` URLs download with yt-dlp |
-| Download any link | `justpaste` | A file link is saved as-is; a page goes through yt-dlp at the highest resolution as MP4; never overwrites |
+| Paste images, files, or links | `justpaste` | Clipboard images become PNG; files support optional copy filters; links download as-is or through yt-dlp; never overwrites |
 | Choose the best web image | `justoptimize` | Measure PNG/WebP/JPEG; preserve alpha; keep source |
 | Create WAV | `justwav` | Stereo 16-bit PCM, 48 kHz; `http(s)` URLs download with yt-dlp |
 | Work with JSON | `justjson` | Format, validate, query, or minify |
@@ -29,7 +29,7 @@
 | Show the public IP address | `justip` | Report the public IPv4 and IPv6 address together; `-4`/`-6` narrow it |
 | Browse development servers | `justports` | Live smart TUI, automatic saving, and one-key Launch Again recipes |
 | Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to `<name>-nobg.png`; Auto visibly falls back to CPU |
-| Archive a repository | `justzip` | ZIP Git's tracked and unignored file set |
+| Archive files or folders | `justzip` | ZIP ordinary inputs recursively; Git folders honor ignore rules |
 | Create and enter a directory | `justmkcd` / `mkcd` | Create one directory; enter it through `just init` shell integration |
 | Claude permission-bypass shortcut | `claude_` | Shell function for `claude --dangerously-skip-permissions`, forwarding arguments |
 | Codex permission-bypass shortcut | `codex_` | Shell function for `codex --yolo`, forwarding arguments |
@@ -285,13 +285,40 @@ just context status
 just context uninstall
 ```
 
-Adds a per-user **JustTools** entry to File Explorer for supported files and
+Adds a per-user **JustTools** entry to File Explorer for all files and
 folders. Entries run built-in defaults in a console window that prints the
 Headless command; `…` entries open the launcher with the selection filled in.
+Any file, folder, mixed selection, or folder background offers JustZip with
+smallest (default), balanced, or fast compression, a non-writing preview, and
+more options. One input writes `<name>.zip` (a file keeps its extension);
+several write `archive.zip`, beside the first selected item. Git folders honor
+ignores; ordinary folders recurse, keeping empty directories. Existing ZIPs
+are replaced atomically; sources stay intact and conflicting names are rejected.
+More options fills in the whole selection with the same default destination.
 The top-level Windows 11 menu needs a signed `justtools-shell.msix` or Developer
 Mode; `--classic` registers under "Show more options". `just context run` is
 the entry point Explorer uses and is not meant to be typed. See
 `docs/context-menu.md`.
+
+## ZIP archives
+
+```sh
+justzip photos --dry-run
+justzip photos --compression balanced
+justzip notes.txt assets --output bundle.zip --dry-run
+justzip notes.txt assets --output bundle.zip
+justzip -- -draft.txt
+```
+
+Run previews before folder or multi-input operations. A single folder puts
+its contents at the ZIP root; multiple inputs keep their file/folder names.
+Ordinary folders do not need Git. Git folders, including nested repositories
+and working-tree subfolders, use Git's tracked and unignored file list;
+explicitly selected files are included even if ignored. `.git` metadata is
+excluded from folder traversal. Symlinks are stored without following them;
+links that escape the selected root fail. Inputs and one-run dry runs are not
+saved. Output and compression can be saved through the launcher.
+See `docs/zip.md`.
 
 ## Media download examples
 
@@ -306,7 +333,8 @@ just video --dry-run https://example.com/watch?v=ID
 wherever they accept a file. yt-dlp downloads it to a temporary folder (best
 video plus audio at 1080p or lower, or at a larger `--resolution`, for video; best audio-only stream otherwise)
 and the tool then encodes it with its usual settings into the current folder, or
-`--output`, as `<title> [<id>].<ext>`. The download is never kept, so `--replace`
+`--output`, as `<title> [<id>].<ext>`, with the title tidied to a short plain
+name (no emoji, symbols, links, or hashtags; cut near 80 characters). The download is never kept, so `--replace`
 has nothing to remove. A playlist link downloads one entry unless `--playlist`
 is passed, and `--dry-run` reports the plan without any network access. yt-dlp
 runs with `--ignore-config`. Every run of these tools and of `justpaste` runs
@@ -320,15 +348,42 @@ does it up front). See `docs/downloads.md`.
 
 ```sh
 justpaste https://example.com/photo.jpg
+justpaste https://github.com/owner/repo
+justpaste git@github.com:owner/repo.git -o projects
+printf '%s\n' 'Save this text' | justpaste --text -o notes
 justpaste https://www.youtube.com/watch?v=ID
 justpaste --clipboard
 justpaste -o downloads --dry-run https://example.com/a.pdf
 ```
 
 `justpaste` saves what a link points at into the current folder or `--output`.
+The CLI and bare launcher run on Windows, macOS, and Linux x64/ARM64.
+URL arguments and stdin, `--copy PATH`, and piped `--text` need no desktop.
+macOS clipboard reads use the system pasteboard through `osascript`;
+Linux uses `wl-paste` on Wayland or `xclip` on X11 for images/files/text,
+with `xsel` as a text fallback. Missing helpers explain CLI alternatives;
+they are never installed silently. Images save as PNG with alpha and copied
+local files retain their sources; GNOME/KDE cut payloads are refused.
+Repository homepages on GitHub, GitLab (including subgroups), Bitbucket,
+Codeberg, Gitea, SourceHut, and Azure Repos, HTTP(S) clone URLs ending in `.git`,
+and SSH/`git://` remotes use `git clone`. The result is a repo-named subfolder
+with history and `origin`; taken names become `repo (2)`, with dots kept in
+the folder name. Files, issues, releases, and archive pages stay downloads.
+Clones are published atomically, and failed/cancelled clones leave no partial
+checkout. Git errors are reported directly without media fallback. `GIT_BIN`
+is a resolve-only override; missing Git requires interactive consent.
+Missing Git warns with install guidance; invalid `GIT_BIN` warns how to fix
+the override. Headless runs never install Git.
+Private repos use existing Git/SSH credentials without unattended sign-in
+prompts. Copy filters do not apply to clones. Repository-only pastes skip
+yt-dlp/FFmpeg resolution and updates. `--dry-run` previews the clone destination
+without network access or requiring Git.
 A file answer is saved unconverted under the server's name; a page goes to
-yt-dlp (YouTube, TikTok, and most other sites), and if that finds nothing the
-page's declared `og:video`/`og:image` is saved. A taken name becomes
+yt-dlp (YouTube, TikTok, and most other sites) and is saved as `<title>.mp4`,
+and if that finds nothing the page's declared `og:video`/`og:image` is saved.
+Names are tidied first: emoji, symbols, links, and hashtags are dropped and a
+long name is cut at a word near 80 characters, so do not predict the saved
+name from the page title; read it from the `saved` line. A taken name becomes
 `name (2).ext`; nothing is overwritten and partial downloads leave nothing
 behind. `--clipboard` takes every link in the copied text, `--playlist` opts
 into multi-entry links, and `--dry-run` makes no request. Use `justvideo` or
@@ -336,6 +391,54 @@ into multi-entry links, and `--dry-run` makes no request. Use `justvideo` or
 `docs/paste.md`.
 
 ## Structured and document examples
+
+### Windows Smart Paste and filtered copies
+
+Clipboard images save as PNG with available alpha preserved. Copied files/folders
+are copied, never moved; cut payloads are refused. `--text` permits plain text to
+become a UTF-8 file.
+
+```powershell
+just paste --enable                         # Explorer Ctrl+V and tray settings
+just paste --status
+just paste --settings                       # native window; no console required
+just paste --diagnose                       # no clipboard payloads or paths printed
+just paste --disable
+just paste --startup on                     # optional current-user login startup
+justpaste --copy project -o existing-folder --exclude 'node_modules;.cache' --respect-gitignore --dry-run
+justpaste --clipboard --saved-settings      # explicitly opt into saved filters
+```
+
+Filtered copies preserve sources, skip links/junctions, and number existing
+destination names. Exclusions are exact names or source-relative paths,
+separated by semicolons (no wildcards). `.gitignore` includes nested rules and
+negation, applies outside Git repos too, and filters explicitly selected ignored
+roots/files as well. Global Git excludes are not used. Run `--dry-run` first.
+Headless calls use supplied options unless `--saved-settings` is explicit.
+The bare launcher saves filters; Start/Stop/Status are one-run actions.
+Click the JustPaste tray icon to open native settings, or right-click for
+grouped quick actions. Save changes validates custom exclusions and saves
+filters together; Cancel leaves them unchanged. Settings can open without
+the resident running. Sign-in startup is still an explicit choice.
+`--enable` starts an independent resident that survives the launching terminal
+closing. A host that forbids process detachment produces a startup error; use
+the Explorer launcher there. Login startup remains a separate opt-in.
+`--status` includes the last notification (memory only, possibly including a
+saved filename). Clipboard PNGs are validated and saved without re-encoding;
+`PNG` and `image/png` are supported. The clipboard is never replaced or cleared.
+The keyboard hook runs separately from tray/settings work, and repeat
+suppression never follows focus into another app or Explorer text field.
+Smart Paste takes over file copies only when a filter is enabled; cut/move and
+virtual files stay native. Explorer's built-in mouse Paste remains native;
+use **JustPaste** in the right-click menu to apply the same filters.
+Long Smart Paste operations show a delayed progress window with stage, elapsed
+time, stream download progress, and Cancel. Closing it hides the window without
+cancelling. yt-dlp is fetched with vendor checksum verification when missing;
+successful update checks last twelve hours, failures retry after fifteen minutes.
+The resident checks this schedule every fifteen minutes. Updates and downloads
+share a per-executable lock; update checks time out after ninety seconds.
+
+### Documents
 
 ```sh
 just json data.json

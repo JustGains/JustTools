@@ -1,8 +1,7 @@
 # File Explorer context menu (Windows)
 
-JustTools can add itself to the right-click menu in File Explorer. The menu
-only appears on things a tool can read, and only lists the tools that apply to
-the selection.
+JustTools can add itself to the right-click menu in File Explorer. All files
+and folders offer JustZip; other tools appear when they apply to the selection.
 
 ```powershell
 just context install     # add the menu for the current user
@@ -24,18 +23,24 @@ No elevation is needed and nothing outside the current user is changed.
 | PDF | **JustPDF** merge (two or more), split into pages, save embedded images, save links, show details, more options…; **JustLinks** |
 | SVG / JSON | **JustSVG**; **JustJSON** format, minify, validate |
 | Office, Markdown, HTML, text, CSV | **JustLinks** to `links.txt` or `links.csv` |
-| Folder, or a folder's empty background | **JustPaste** downloads the copied link into that folder; JustOptimize, JustResize, JustWebP, JustVideo, JustMP3, and JustLinks launchers opened in that folder; **JustZip** when the folder is a Git working tree |
+| Folder, or a folder's empty background | **JustPaste** saves clipboard images, copies files with saved filters, or downloads links into that folder; JustOptimize, JustResize, JustWebP, JustVideo, JustMP3, and JustLinks launchers opened in that folder |
+| Any file, folder, mixed selection, or a folder's empty background | **JustZip**: smallest ZIP (default), balanced ZIP, fast ZIP, preview included files, more options… |
 
 Every choice is its own row in the JustTools flyout, such as
 **JustVideo · 1080p**. The Windows 11 menu does not draw a flyout nested inside
 another, so the menu is one level deep by design.
 
+**JustPaste · paste here** uses a folded-sheet icon on a violet-to-blue tile,
+matching its tray icon and native settings window. Windows draws the Explorer
+menu itself, including its theme, spacing, and keyboard navigation.
+
 Every menu ends with **Open JustTools here**, which opens the `just` tool
-browser in that folder. `.ts` and `.mts` are left alone because they are far
-more often TypeScript than video.
+browser in that folder. `.ts` and `.mts` offer ZIP actions but no video actions
+because they are far more often TypeScript than video.
 
 A mixed selection shows every tool that can read at least one selected file,
-and each tool is given only the files it reads.
+and each tool is given only the files it reads. JustZip receives the whole
+selection and creates one archive.
 
 ## What a click does
 
@@ -45,7 +50,7 @@ the menu never does anything the command line cannot.
 
 - Every window closes by itself: after about three seconds when the run
   succeeded, and after thirty when it failed or the result is something to read
-  (PDF details, JSON validation).
+  (PDF details, JSON validation, ZIP preview).
 - Enter closes it at once; any other key stops the countdown and keeps the
   window open until Enter.
 - Entries ending in **…** open the tool's [console launcher](console-ui.md)
@@ -55,6 +60,10 @@ the menu never does anything the command line cannot.
 
 Menu entries use each tool's built-in defaults plus the one setting the entry
 names; saved launcher defaults apply only to the **…** entries.
+
+JustPaste explicitly passes `--saved-settings` so its copy exclusions and
+text-to-file toggle match Smart Paste's tray settings. Its destination is always
+the clicked folder, independent of the launcher's saved output folder.
 
 | Entry | Command | Result |
 | --- | --- | --- |
@@ -66,13 +75,30 @@ names; saved launcher defaults apply only to the **…** entries.
 | JustJPG | `justjpg` | `<name>-optimized.jpg`, source kept |
 | JustPNG · compress in place | `justpng` | Replaces the PNG only when the result is smaller |
 | JustCrop / JustRMBG | `justcrop`, `justrmbg` | `<name>-cropped.<same>` / `<name>-nobg.png`, source kept |
-| JustPaste | `justpaste --clipboard` | The copied link's file in that folder; a taken name is numbered, never overwritten |
+| JustPaste | `justpaste --clipboard --saved-settings` | Clipboard image as PNG, filtered file copy, or downloaded link; a taken name is numbered, never overwritten |
+| JustZip · smallest ZIP (default) | `justzip <inputs...>` | `<name>.zip` for one input, `archive.zip` for several, beside the first selected item; sources kept |
+| JustZip · balanced ZIP / fast ZIP | `justzip --compression balanced <inputs...>` / `justzip --compression fast <inputs...>` | Same destination with the selected compression; sources kept |
+| JustZip · preview included files | `justzip --dry-run <inputs...>` | Shows the destination and included entries without writing |
 | JustSVG, JustJSON Format/Minify | `justsvg`, `justjson`, `justjson --minify` | Rewrites the file in place |
+
+JustZip includes ordinary folders recursively, including empty folders, and
+uses Git's tracked and unignored file list for Git folders and their subfolders.
+Explicit files are included even if ignored. A single folder contributes its
+contents; multiple selections retain each file or folder's name. For one file,
+the ZIP name includes the original extension: `notes.txt.zip`. A folder's
+background archives that folder, with its ZIP beside it.
+
+An existing ZIP at the destination is replaced atomically, matching `justzip`;
+sources stay intact. Conflicting names inside an archive and a destination
+that would replace a selected source are rejected before writing.
+**More options…** opens the launcher with every selected item filled in and the
+same default destination, allowing a different output path and saved compression.
+See the [JustZip guide](zip.md) for naming, Git behavior, and symlinks.
 
 Entries that change a file in place say so. JustWebP and JustAVIF normally
 remove a source once a smaller result exists; the menu passes `--output .` so
-a right-click never deletes anything. The menu never passes `--yes`, so a tool
-that would overwrite an existing result still asks in the console window.
+a right-click never deletes anything. The menu never passes `--yes`; tools that
+require overwrite confirmation still ask in the console window.
 
 ## Windows 11 top-level menu
 

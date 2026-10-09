@@ -68,17 +68,23 @@ impl Store {
     }
 
     pub fn set(&mut self, tool: &str, field: &str, value: Option<&str>) -> Result<()> {
+        self.set_many(tool, &[(field, value)])
+    }
+
+    pub fn set_many(&mut self, tool: &str, values: &[(&str, Option<&str>)]) -> Result<()> {
         self.preferences = Self::load_from(self.path.clone())?.preferences;
-        if let Some(value) = value {
-            self.preferences
-                .tools
-                .entry(tool.to_owned())
-                .or_default()
-                .insert(field.to_owned(), value.to_owned());
-        } else if let Some(fields) = self.preferences.tools.get_mut(tool) {
-            fields.remove(field);
-            if fields.is_empty() {
-                self.preferences.tools.remove(tool);
+        for &(field, value) in values {
+            if let Some(value) = value {
+                self.preferences
+                    .tools
+                    .entry(tool.to_owned())
+                    .or_default()
+                    .insert(field.to_owned(), value.to_owned());
+            } else if let Some(fields) = self.preferences.tools.get_mut(tool) {
+                fields.remove(field);
+                if fields.is_empty() {
+                    self.preferences.tools.remove(tool);
+                }
             }
         }
         self.save()
@@ -154,5 +160,36 @@ mod tests {
         let loaded = Store::load_from(path).unwrap();
         assert_eq!(loaded.get("justjpg", "quality"), Some("90"));
         assert_eq!(loaded.get("justzip", "compression"), Some("fast"));
+    }
+
+    #[test]
+    fn a_settings_save_updates_multiple_fields_without_losing_other_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("defaults.toml");
+        let mut settings = Store::load_from(path.clone()).unwrap();
+        let mut launcher = Store::load_from(path.clone()).unwrap();
+        launcher
+            .set("justpaste", "output", Some("downloads"))
+            .unwrap();
+        launcher.set("justpaste", "excludes", Some("old")).unwrap();
+        launcher.set("justjpg", "quality", Some("91")).unwrap();
+        settings
+            .set_many(
+                "justpaste",
+                &[
+                    ("ignore_node_modules", Some("true")),
+                    ("gitignore", Some("true")),
+                    ("text", Some("false")),
+                    ("excludes", None),
+                ],
+            )
+            .unwrap();
+        let loaded = Store::load_from(path).unwrap();
+        assert_eq!(loaded.get("justpaste", "ignore_node_modules"), Some("true"));
+        assert_eq!(loaded.get("justpaste", "gitignore"), Some("true"));
+        assert_eq!(loaded.get("justpaste", "text"), Some("false"));
+        assert_eq!(loaded.get("justpaste", "excludes"), None);
+        assert_eq!(loaded.get("justpaste", "output"), Some("downloads"));
+        assert_eq!(loaded.get("justjpg", "quality"), Some("91"));
     }
 }

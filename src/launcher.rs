@@ -503,6 +503,9 @@ impl App {
     }
 
     fn skip_in_command(&self, id: &str) -> bool {
+        if self.tool.name == "justpaste" && self.value("operation") != "paste" {
+            return id != "operation";
+        }
         if id == "replace" && !self.value("output").is_empty() {
             return true;
         }
@@ -716,13 +719,17 @@ impl App {
                         .into(),
                 )
             }
+            "justpaste" if self.value("operation") != "paste" => (
+                "Output: the active Explorer folder when Ctrl+V is pressed".into(),
+                "Overwrite: never. Saved copy filters apply; cut/move stays with Explorer.".into(),
+            ),
             "justpaste" => (
                 format!(
                     "Output: {}",
-                    self.destination("<the name the link's server gives the file>")
+                    self.destination("<image, text, copied file, download, or repository folder>")
                         .replace("beside each source as", "the current folder as")
                 ),
-                "Overwrite: never; a taken name is saved as \"name (2).ext\".".into(),
+                "Overwrite: never; taken names become \"name (2).ext\" or \"repo (2)\".".into(),
             ),
             "justvideo" => (
                 format!(
@@ -815,6 +822,31 @@ impl App {
                     format!("Output: {destination} ({format})"),
                     "Overwrite: inputs are only read; an existing output needs confirmation."
                         .into(),
+                )
+            }
+            "justzip" => {
+                let output = self.value("output").trim();
+                let inputs = split_inputs(self.value("input"));
+                let mut sources: Vec<_> = inputs.iter().map(|input| absolute_path(input)).collect();
+                if sources.is_empty() {
+                    sources.push(absolute_path("."));
+                }
+                let destination = crate::commands::zip::destination(
+                    &sources,
+                    (!output.is_empty()).then(|| std::path::Path::new(output)),
+                )
+                .map_or_else(
+                    |error| error.message().to_owned(),
+                    |path| crate::common::friendly_path_text(&path),
+                );
+                (
+                    format!("Output: {destination}"),
+                    if self.enabled("dry_run") {
+                        "Overwrite: nothing is written during a dry run."
+                    } else {
+                        "Overwrite: sources kept; existing ZIP replaced atomically."
+                    }
+                    .into(),
                 )
             }
             _ => (String::new(), String::new()),
@@ -1077,6 +1109,19 @@ pub(crate) fn quote(value: &str) -> String {
 
 fn choice(label: &'static str, value: &'static str, args: &'static [&'static str]) -> Choice {
     Choice { label, value, args }
+}
+
+fn paste_actions() -> Vec<Choice> {
+    let mut actions = vec![choice("Paste clipboard / links", "paste", &[])];
+    if cfg!(windows) {
+        actions.extend([
+            choice("Start Smart Paste (Windows)", "enable", &["--enable"]),
+            choice("Stop Smart Paste", "disable", &["--disable"]),
+            choice("Smart Paste status", "status", &["--status"]),
+            choice("Windows settings…", "settings", &["--settings"]),
+        ]);
+    }
+    actions
 }
 fn input(
     label: &'static str,
@@ -2059,11 +2104,21 @@ fn spec(name: &str) -> Option<Tool> {
         "justpaste" => Tool {
             name: "justpaste",
             title: "JustPaste",
-            summary: "Download whatever a link points at",
+            summary: "Paste images, files, and links; clone Git repositories",
             fields: vec![
+                Field {
+                    persistent: false,
+                    ..choices(
+                        "operation",
+                        "Action",
+                        "One-run action. Windows Smart Paste uses the saved filters below.",
+                        "paste",
+                        paste_actions(),
+                    )
+                },
                 input(
                     "Links",
-                    "Use semicolons between several links. Blank pastes the links in the clipboard.",
+                    "Use semicolons between links. Git repository links clone into a subfolder. Blank uses the clipboard.",
                     true,
                     Some("--clipboard"),
                     false,
@@ -2077,6 +2132,35 @@ fn spec(name: &str) -> Option<Tool> {
                     true,
                 ),
                 toggle(
+                    "ignore_node_modules",
+                    "Skip node_modules",
+                    "Skip node_modules in copied trees. Smart Paste reads this saved setting. Cut/move stays native.",
+                    "--ignore-node-modules",
+                    true,
+                ),
+                text(
+                    "excludes",
+                    "Ignored names / paths",
+                    "Semicolon-separated names or source-relative paths, e.g. .cache;build/temp. No wildcards. Applies only to copies.",
+                    "",
+                    "--exclude",
+                    true,
+                ),
+                toggle(
+                    "gitignore",
+                    "Respect .gitignore",
+                    "Apply nested .gitignore and .git/info/exclude rules to copies, including explicitly selected files. Sources stay intact.",
+                    "--respect-gitignore",
+                    true,
+                ),
+                toggle(
+                    "text",
+                    "Save plain text as .txt",
+                    "Allow plain clipboard text to become a UTF-8 file. Images and links take priority.",
+                    "--text",
+                    true,
+                ),
+                toggle(
                     "playlist",
                     "Download playlists",
                     "Download every entry when a link is a playlist.",
@@ -2086,7 +2170,7 @@ fn spec(name: &str) -> Option<Tool> {
                 toggle(
                     "dry_run",
                     "Dry run",
-                    "List the links without any network access. This one-run safety action is not saved.",
+                    "Preview clipboard files, image dimensions, or links without writing or network access. Not saved.",
                     "--dry-run",
                     false,
                 ),
@@ -2367,13 +2451,13 @@ fn spec(name: &str) -> Option<Tool> {
         },
         "justzip" => Tool {
             name: "justzip",
-            title: "JustZIP",
-            summary: "Archive exactly what Git includes",
+            title: "JustZip",
+            summary: "ZIP files and folders; honor Git ignores",
             fields: vec![
                 input(
-                    "Project folder",
-                    "Blank archives the current folder.",
-                    false,
+                    "Input files / folders",
+                    "Separate inputs with semicolons. Blank archives the current folder.",
+                    true,
                     Some("."),
                     false,
                 ),
@@ -2533,6 +2617,28 @@ mod tests {
     fn default_jpg_command_is_explicitly_headless() {
         let app = app_for("justjpg");
         assert_eq!(app.command(), "justjpg .");
+    }
+
+    #[test]
+    fn zip_launcher_keeps_the_complete_selection_and_dry_run_out_of_defaults() {
+        let mut app = app_for("justzip");
+        assert_eq!(app.command(), "justzip .");
+        for (id, value) in [("input", "\"my files\"; ./-notes.xyz"), ("dry_run", "true")] {
+            let entry = app
+                .values
+                .iter_mut()
+                .find(|entry| entry.field.id == id)
+                .unwrap();
+            assert!(!entry.field.persistent);
+            entry.value = value.to_owned();
+        }
+        assert_eq!(
+            app.args().unwrap(),
+            ["my files", "./-notes.xyz", "--dry-run"].map(OsString::from)
+        );
+        let (destination, overwrite) = app.output_policy();
+        assert!(destination.contains("archive.zip"));
+        assert!(overwrite.contains("nothing is written"));
     }
 
     #[test]

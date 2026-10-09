@@ -33,6 +33,10 @@ output or re-encode behind the tool's back.
 
 Downloads have no source folder to sit beside, so they are written to the
 current folder, or to `--output`, as `<title> [<id>].<target-extension>`.
+The title is tidied as [JustPaste](paste.md#names-and-safety) tidies it: emoji,
+symbols, links, and hashtags are dropped and a long title is cut at a word near
+80 characters. The id stays in the name because an existing destination is
+replaced, and two videos can share a title.
 `justvideo` uses that plain name rather than the `-web` suffix reserved for
 optimizing a local file. An existing destination is replaced atomically,
 exactly as it is for a local conversion.
@@ -55,13 +59,19 @@ checks when yt-dlp was last updated and runs `yt-dlp --update` if twelve hours
 have passed, whether or not that run downloads anything. Sites change faster
 than releases reach package managers, so this keeps downloads working. A dry
 run and a machine without yt-dlp are left alone. The timestamp of the last
-attempt is stored next to the defaults file, which `just --defaults-path`
-prints, as `yt-dlp-update`.
+successful check is stored next to the defaults file, which `just --defaults-path`
+prints. State filenames start with `yt-dlp-update-` and include a hash of the
+executable's path, so switching binaries triggers a fresh check.
 
 The update is best-effort. A package-managed yt-dlp refuses to replace itself
 and an offline machine cannot reach the release feed; either way the message is
 a warning and the run proceeds with the installed version. The next attempt
-still waits twelve hours, so a broken feed cannot slow every run.
+waits fifteen minutes after a failure. A successful check waits twelve hours.
+Update commands time out after ninety seconds and use `--ignore-config`.
+Concurrent runs share a lock, so an update cannot replace the executable during
+a JustTools media download. The Windows Smart Paste resident checks the schedule
+every fifteen minutes, including while idle. It fetches a missing yt-dlp when
+a page paste first needs it; direct file and image pastes need no downloader.
 
 ## Requirements
 

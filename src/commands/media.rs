@@ -1361,7 +1361,7 @@ fn download_directory(options: &Options) -> PathBuf {
 }
 
 /// Downloads carry no source folder to write beside, so they land in the
-/// current folder (or --output) under the title yt-dlp saved them as. Each
+/// current folder (or --output) under their tidied title and id. Each
 /// plan is reported against its URL rather than its temporary file.
 fn download_plans(
     mode: MediaMode,
@@ -1372,12 +1372,13 @@ fn download_plans(
     files
         .into_iter()
         .map(|fetched| {
-            let stem = fetched
-                .file
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
+            // An existing output is replaced, so the id keeps two videos that
+            // share a title apart.
+            let stem = match fetched.id.as_str() {
+                "" => fetched.stem,
+                id if id == fetched.stem => fetched.stem,
+                id => format!("{} [{id}]", fetched.stem),
+            };
             (
                 Plan {
                     output: parent.join(format!("{stem}{}", mode.target_extension())),
@@ -1726,7 +1727,9 @@ mod tests {
             &options,
             vec![download::Fetched {
                 url: "https://example.test/watch?v=1".into(),
-                file: PathBuf::from("Great Clip [abc123].mkv"),
+                file: PathBuf::from("001.mkv"),
+                stem: "Great Clip".into(),
+                id: "abc123".into(),
             }],
         );
         let (plan, url) = &plans[0];

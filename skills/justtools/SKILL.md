@@ -47,10 +47,10 @@ Claude-only or Codex-only tool name when a normal shell operation is sufficient.
 
 ## Dependency consent
 
-Some media commands need FFmpeg, pngquant, cwebp, or Git, and `justpaste` and
-an `http(s)` input to `justvideo`, `justaudio`, `justmp3`, or `justwav` also
-need yt-dlp. RMBG may need ONNX Runtime and its model. JustTools discovers
-these only when needed.
+Some commands need FFmpeg, pngquant, cwebp, or Git. Page links in `justpaste`
+and an `http(s)` input to `justvideo`, `justaudio`, `justmp3`, or `justwav`
+need yt-dlp. Repository links in `justpaste` need Git. RMBG may need ONNX
+Runtime and its model. JustTools discovers these only when needed.
 
 **yt-dlp and FFmpeg download themselves.** When either is missing from `PATH`,
 the first tool that needs it fetches the vendor's build into a per-user
@@ -88,6 +88,35 @@ installer and may surface UAC or `sudo` prompts.
 
 ## Safety rules
 
+- JustPaste's Windows Smart Paste mode runs from the same binary (`just paste
+  --enable` / `--disable` / `--status`); login startup is a separate opt-in.
+  JustPaste's CLI and clipboard also work on macOS and Linux. macOS uses
+  its native pasteboard; Linux clipboard images/files need `wl-paste` on
+  Wayland or `xclip` on X11 (`xsel` reads only text). Missing helpers explain
+  how to use URL arguments, `--copy PATH`, or stdin instead; never install
+  these helpers silently. Piped plain text needs `--text`.
+  Do not enable copy exclusions silently: they intentionally omit data from
+  copies. Preview `--copy PATH --output EXISTING_DIR --dry-run` with the desired
+  `--exclude 'node_modules;.cache'` or `--respect-gitignore` options. Never turn
+  a cut payload into a filtered move. Explicit CLI calls use saved filters only
+  with `--saved-settings`; Explorer's JustPaste entry passes that flag.
+  Clipboard images save locally as PNG; ordinary text needs `--text`.
+  Git repository links clone into a repo-named subfolder with history and
+  `origin`; existing names are numbered. Preview with `--dry-run` first.
+  Git uses `PATH` or resolve-only `GIT_BIN`; missing Git still requires
+  interactive installation confirmation. Use existing Git/SSH credentials,
+  since unattended clones do not open sign-in prompts. Failed or cancelled
+  clones leave no partial checkout. Copy filters apply only to copied files.
+  `just paste --settings` opens a native Windows window even with redirected
+  input. It needs no running resident and only saves when Save changes is chosen;
+  use explicit copy flags for unattended work.
+  Long pastes show native progress; its Cancel button applies only to that paste.
+  The resident checks yt-dlp updates every fifteen minutes: successful checks
+  last twelve hours, failures retry after fifteen minutes. Missing yt-dlp is
+  downloaded on demand with vendor SHA-256 verification. Do not replace an
+  existing PATH installation just to test the fallback; use an isolated managed
+  tools directory and process environment.
+
 - Use `--` before a path beginning with `-`.
 - Windows installs include automatic PowerShell launchers for `mkcd`, `just`,
   `justmkcd`, `claude_`, and `codex_`; no init/profile changes are required.
@@ -102,7 +131,7 @@ installer and may surface UAC or `sudo` prompts.
   through, and neither shortcut stores a permission bypass in JustTools defaults.
 - An `http(s)` input to `justvideo`, `justaudio`, `justmp3`, or `justwav`
   reaches the network: it downloads the media with yt-dlp. Every run of those
-  tools and of `justpaste` also runs `yt-dlp --update` once twelve hours have
+  tools and pastes with download links also run `yt-dlp --update` once twelve hours have
   passed since the last update. Pass only a URL the user supplied,
   and use `--dry-run` to show the plan without downloading. `--playlist`
   downloads every entry of a playlist link, so add it only when asked.
@@ -190,12 +219,17 @@ the shared file.
   pinned managed runtime/model to install without a second prompt.
 - `justrmbg --check`: test runtime/provider session creation and tiny inference
   without resolving or downloading the BRIA model.
-- `justpaste <url>` / `justpaste --clipboard`: download whatever a link points
+- `justpaste <url>` / `justpaste --clipboard`: clone repository links into a
+  repo-named subfolder, or download whatever other links point
   at, unconverted; pages go through yt-dlp. Never overwrites.
 - `justip`: report the public IPv4 and IPv6 address together; `--plain` and
   `--json` keep stdout free of anything but the answer, and a family with no
   public route is reported as unavailable rather than failing the run.
-- `just zip`: archive Git's exact tracked and unignored working-tree files.
+- `just zip . --dry-run`: preview a ZIP of the current folder. Ordinary folders
+  recurse without Git; Git folders honor all Git ignore rules. Explicit files
+  are included even if ignored, and multiple inputs share one archive. Sources
+  are kept, but an existing destination ZIP is replaced atomically, so inspect
+  the output path before running. Use `--output` to keep an earlier archive.
 
 Read [references/commands.md](references/commands.md) for the full command map
 and standard examples.

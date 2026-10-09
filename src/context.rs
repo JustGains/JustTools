@@ -314,7 +314,11 @@ fn accepted(tool: Tool, paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
         .filter(|path| {
-            if matches!(tool, Tool::Zip | Tool::Paste) {
+            if tool == Tool::Zip {
+                // Every selected path is an input. Let JustZip report missing
+                // or unreadable paths instead of silently omitting them.
+                true
+            } else if tool == Tool::Paste {
                 path.is_dir()
             } else {
                 menu::extension(&path.to_string_lossy())
@@ -365,7 +369,7 @@ fn plan(action: &Action, tool: Tool, paths: &[PathBuf]) -> Result<Vec<Invocation
             })
             .collect());
     }
-    Ok(if action.per_file || tool == Tool::Zip {
+    Ok(if action.per_file {
         inputs
             .iter()
             .map(|file| invocation(&parent_of(file), std::slice::from_ref(file), false))
@@ -510,6 +514,18 @@ fn folder_of(paths: &[PathBuf]) -> PathBuf {
     }
 }
 
+fn launcher_directory(run: Run, paths: &[PathBuf]) -> PathBuf {
+    if run == Run::Launcher {
+        // A selected folder is an input, just like a selected file. Start in
+        // its parent so JustZip's default ZIP lands beside it, as presets do.
+        paths
+            .first()
+            .map_or_else(|| PathBuf::from("."), |path| parent_of(path))
+    } else {
+        folder_of(paths)
+    }
+}
+
 /// The launcher's input row for a selection: names inside the working folder,
 /// quoted wherever the row's `;` separator or quote handling would split them.
 fn launcher_inputs(paths: &[PathBuf], directory: &Path) -> String {
@@ -550,7 +566,7 @@ fn perform(action: &Action, paths: &[PathBuf]) -> ToolResult<Outcome> {
             if !interactive() {
                 return Err(needs_terminal());
             }
-            let directory = folder_of(paths);
+            let directory = launcher_directory(action.run, paths);
             enter(&directory)?;
             set_title(&format!("JustTools · {}", tool.name()));
             let configured = if action.run == Run::Launcher {
@@ -773,11 +789,43 @@ mod tests {
         let runs = plan(&action, Tool::Paste, &[folder.path().to_path_buf()]).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].directory, folder.path());
-        assert_eq!(strings(&runs[0]), ["--clipboard"]);
+        assert_eq!(strings(&runs[0]), ["--clipboard", "--saved-settings"]);
         assert_eq!(
             headless_line(Tool::Paste, &action, &runs[0]),
-            "justpaste --clipboard"
+            "justpaste --clipboard --saved-settings"
         );
+    }
+
+    #[test]
+    fn zip_presets_and_options_use_the_selected_folders_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("my project");
+        std::fs::create_dir(&source).unwrap();
+        let paths = [source.clone()];
+        for (id, expected) in [
+            ("zip", "justzip 'my project'"),
+            (
+                "zip.balanced",
+                "justzip --compression balanced 'my project'",
+            ),
+            ("zip.fast", "justzip --compression fast 'my project'"),
+            ("zip.preview", "justzip --dry-run 'my project'"),
+        ] {
+            let action = menu::action(id).unwrap();
+            let runs = plan(&action, Tool::Zip, &paths).unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].directory, directory.path());
+            assert_eq!(headless_line(Tool::Zip, &action, &runs[0]), expected);
+        }
+
+        let action = menu::action("zip.options").unwrap();
+        let working_directory = launcher_directory(action.run, &paths);
+        assert_eq!(working_directory, directory.path());
+        assert_eq!(
+            launcher_inputs(&paths, &working_directory),
+            "\"my project\""
+        );
+        assert_eq!(launcher_directory(Run::LauncherHere, &paths), source);
     }
 
     #[test]

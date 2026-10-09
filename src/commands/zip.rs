@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -12,14 +13,22 @@ use crate::common;
 use crate::deps;
 use crate::error::{ToolError, ToolResult};
 
-const HELP: &str = r#"justzip — Archive a Git working tree while honoring every Git ignore rule.
+const HELP: &str = r#"justzip — Archive files and folders, honoring Git ignore rules in working trees.
 
 Usage:
-  justzip [options] [folder]
+  justzip [options] [file-or-folder ...]
 
-In direct/headless mode, `.` archives the current folder. The default output is
-<folder>.zip in the current directory. Git supplies the file list, so nested
-.gitignore files, .git/info/exclude, and global ignores all apply.
+In direct/headless mode, `.` archives the current folder. One input produces
+<name>.zip (including a file's extension); several inputs produce archive.zip
+in the current directory. A single folder contributes its contents; multiple
+inputs keep their file/folder names. Sources are kept and existing ZIP outputs
+are replaced atomically. Conflicting archive names are rejected before writing.
+
+Ordinary folders include all contents recursively, including empty folders,
+except .git metadata. Git folders use Git's tracked and unignored file list,
+so nested .gitignore files, .git/info/exclude, and global ignores apply.
+Explicitly selected files are included even if ignored. Git is needed only
+for Git folders. Symlinks are stored without following them; unsafe links fail.
 
 Run bare to open the interactive launcher; explicit arguments bypass the UI.
 
@@ -67,7 +76,7 @@ impl Compression {
 }
 
 struct Options {
-    source: Option<PathBuf>,
+    sources: Vec<PathBuf>,
     output: Option<PathBuf>,
     compression: Compression,
     dry_run: bool,
@@ -76,7 +85,7 @@ struct Options {
 
 fn parse(args: Vec<OsString>) -> ToolResult<Options> {
     let mut options = Options {
-        source: None,
+        sources: Vec::new(),
         output: None,
         compression: Compression::Smallest,
         dry_run: false,
@@ -91,13 +100,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
             continue;
         }
         let Some(original) = args[index].to_str() else {
-            if options.source.is_some() {
-                return Err(ToolError::usage(
-                    "justzip",
-                    "only one folder can be archived at a time",
-                ));
-            }
-            options.source = Some(PathBuf::from(&args[index]));
+            options.sources.push(PathBuf::from(&args[index]));
             index += 1;
             continue;
         };
@@ -150,45 +153,53 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
                     ));
                 }
                 _ => {
-                    if options.source.is_some() {
-                        return Err(ToolError::usage(
-                            "justzip",
-                            "only one folder can be archived at a time",
-                        ));
-                    }
-                    options.source = Some(PathBuf::from(&args[index]));
+                    options.sources.push(PathBuf::from(&args[index]));
                 }
             }
-        } else if options.source.is_some() {
-            return Err(ToolError::usage(
-                "justzip",
-                "only one folder can be archived at a time",
-            ));
         } else {
-            options.source = Some(PathBuf::from(&args[index]));
+            options.sources.push(PathBuf::from(&args[index]));
         }
         index += 1;
     }
     Ok(options)
 }
 
-fn resolved_directory(path: &Path) -> ToolResult<PathBuf> {
-    let source = path
-        .canonicalize()
-        .map_err(|_| ToolError::new("justzip", format!("folder not found: {}", path.display())))?;
-    if !source.is_dir() {
+fn resolved_source(path: &Path) -> ToolResult<PathBuf> {
+    let absolute = lexical_absolute(path)?;
+    let metadata = fs::symlink_metadata(&absolute).map_err(|error| {
+        ToolError::new(
+            "justzip",
+            format!("cannot inspect {}: {error}", path.display()),
+        )
+    })?;
+    if !metadata.is_dir() && !metadata.is_file() && !metadata.file_type().is_symlink() {
         return Err(ToolError::new(
             "justzip",
-            format!("not a folder: {}", path.display()),
+            format!("not a file or folder: {}", path.display()),
         ));
     }
-    if source.parent().is_none() {
+    let Some(name) = absolute.file_name() else {
         return Err(ToolError::new(
             "justzip",
             "refusing to archive a filesystem root",
         ));
+    };
+    if metadata.file_type().is_symlink() {
+        // Resolve the parent, never a selected link's target.
+        absolute
+            .parent()
+            .unwrap_or(Path::new("."))
+            .canonicalize()
+            .map(|parent| parent.join(name))
+    } else {
+        absolute.canonicalize()
     }
-    Ok(source)
+    .map_err(|error| {
+        ToolError::new(
+            "justzip",
+            format!("cannot resolve {}: {error}", path.display()),
+        )
+    })
 }
 
 fn lexical_absolute(path: &Path) -> ToolResult<PathBuf> {
@@ -251,11 +262,11 @@ fn resolved_output(path: &Path) -> ToolResult<PathBuf> {
     Ok(resolved)
 }
 
-fn destination(source: &Path, argument: Option<&Path>) -> ToolResult<PathBuf> {
-    let directory_name = source
-        .file_name()
-        .ok_or_else(|| ToolError::new("justzip", "cannot derive archive name"))?;
-    let archive_name = format!("{}.zip", directory_name.to_string_lossy());
+pub(crate) fn destination(sources: &[PathBuf], argument: Option<&Path>) -> ToolResult<PathBuf> {
+    let archive_name = match sources {
+        [source] => format!("{}.zip", source_name(source)?),
+        _ => "archive.zip".to_owned(),
+    };
     let current =
         std::env::current_dir().map_err(|error| ToolError::new("justzip", error.to_string()))?;
     let output = match argument {
@@ -320,18 +331,29 @@ struct Entry {
 enum EntryKind {
     File,
     Symlink(PathBuf),
+    Directory,
 }
 
 fn safe_relative(value: &str) -> bool {
-    !Path::new(value).components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    })
+    !value.is_empty()
+        && !value.contains(['\\', ':'])
+        && !Path::new(value).components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 fn safe_symlink_target(entry_name: &str, target: &Path) -> bool {
+    let Some(text) = target.to_str() else {
+        return false;
+    };
+    // ZIP link targets use forward slashes on every platform. Never turn a
+    // literal Unix backslash or a Windows drive name into an escaping link.
+    if text.contains(':') || (!cfg!(windows) && text.contains('\\')) {
+        return false;
+    }
     if target.is_absolute() {
         return false;
     }
@@ -353,6 +375,7 @@ fn collect_entries(
     source: &Path,
     destination: &Path,
     names: Vec<String>,
+    git: bool,
 ) -> ToolResult<(Vec<Entry>, usize, usize)> {
     let relative_output = destination
         .strip_prefix(source)
@@ -371,7 +394,7 @@ fn collect_entries(
         if !safe_relative(&normalized) {
             return Err(ToolError::new(
                 "justzip",
-                format!("Git returned a path outside the source folder: {normalized}"),
+                format!("unsafe archive path: {normalized}"),
             ));
         }
         if relative_output.as_deref().is_some_and(|value| {
@@ -387,7 +410,7 @@ fn collect_entries(
         let full_path = source.join(Path::new(&normalized));
         let metadata = match fs::symlink_metadata(&full_path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if git && error.kind() == std::io::ErrorKind::NotFound => {
                 skipped_missing += 1;
                 continue;
             }
@@ -439,11 +462,189 @@ fn collect_entries(
                 kind: EntryKind::File,
             });
         } else if metadata.is_dir() {
-            skipped_gitlinks += 1;
+            if git {
+                skipped_gitlinks += 1;
+            } else {
+                entries.push(Entry {
+                    full_path,
+                    name: format!("{normalized}/"),
+                    kind: EntryKind::Directory,
+                });
+            }
         } else {
             skipped_missing += 1;
         }
     }
+    Ok((entries, skipped_gitlinks, skipped_missing))
+}
+
+fn source_name(source: &Path) -> ToolResult<&str> {
+    source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| safe_relative(name))
+        .ok_or_else(|| {
+            ToolError::new(
+                "justzip",
+                format!("unsafe or non-UTF-8 input name: {}", source.display()),
+            )
+        })
+}
+
+fn git_folder(source: &Path) -> bool {
+    source
+        .ancestors()
+        .any(|parent| parent.join(".git").exists())
+}
+
+fn git_binary() -> ToolResult<PathBuf> {
+    if let Some(requested) = std::env::var_os("GIT_BIN").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(&requested);
+        if path.is_file() {
+            return Ok(path);
+        }
+        let text = requested.to_str().ok_or_else(|| {
+            ToolError::new(
+                "justzip",
+                format!(
+                    "GIT_BIN points to a missing non-UTF-8 path: {}",
+                    path.to_string_lossy()
+                ),
+            )
+        })?;
+        deps::require("justzip", text)
+    } else {
+        deps::require("justzip", "git")
+    }
+}
+
+fn folder_entries(source: &Path, destination: &Path) -> ToolResult<(Vec<Entry>, usize, usize)> {
+    if git_folder(source) {
+        let names = git_file_list(&git_binary()?, source)?;
+        return collect_entries(source, destination, names, true);
+    }
+    let mut names = Vec::new();
+    let mut nested = Vec::new();
+    let mut skipped_gitlinks = 0;
+    let mut skipped_missing = 0;
+    let mut walker = walkdir::WalkDir::new(source)
+        .min_depth(1)
+        .sort_by_file_name()
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_name().to_str().is_some_and(|name| {
+                if cfg!(windows) {
+                    name.eq_ignore_ascii_case(".git")
+                } else {
+                    name == ".git"
+                }
+            })
+        });
+    while let Some(entry) = walker.next() {
+        let entry = entry.map_err(|error| ToolError::new("justzip", error.to_string()))?;
+        let relative = entry
+            .path()
+            .strip_prefix(source)
+            .map_err(|error| ToolError::new("justzip", error.to_string()))?;
+        let name = relative
+            .to_str()
+            .ok_or_else(|| ToolError::new("justzip", "cannot archive a non-UTF-8 path"))?;
+        let name = if cfg!(windows) {
+            name.replace('\\', "/")
+        } else {
+            name.to_owned()
+        };
+        names.push(name.clone());
+        if entry.file_type().is_dir() && entry.path().join(".git").exists() {
+            // An ordinary folder can contain repositories. Keep each one's
+            // Git file set instead of descending into ignored build outputs.
+            walker.skip_current_dir();
+            let (mut entries, gitlinks, missing) = folder_entries(entry.path(), destination)?;
+            for entry in &mut entries {
+                entry.name = format!("{name}/{}", entry.name);
+            }
+            nested.extend(entries);
+            skipped_gitlinks += gitlinks;
+            skipped_missing += missing;
+        }
+    }
+    let (mut entries, _, missing) = collect_entries(source, destination, names, false)?;
+    entries.extend(nested);
+    Ok((entries, skipped_gitlinks, skipped_missing + missing))
+}
+
+fn archive_entries(
+    sources: &[PathBuf],
+    destination: &Path,
+) -> ToolResult<(Vec<Entry>, usize, usize)> {
+    let mut entries = Vec::new();
+    let mut skipped_gitlinks = 0;
+    let mut skipped_missing = 0;
+    for source in sources {
+        if common::same_path(source, destination) {
+            return Err(ToolError::new(
+                "justzip",
+                "the output would replace a selected source; choose a different --output",
+            ));
+        }
+        let name = source_name(source)?;
+        let metadata = fs::symlink_metadata(source)
+            .map_err(|error| ToolError::new("justzip", error.to_string()))?;
+        let (mut selected, gitlinks, missing) =
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                let (mut selected, gitlinks, missing) = folder_entries(source, destination)?;
+                if sources.len() > 1 {
+                    for entry in &mut selected {
+                        entry.name = format!("{name}/{}", entry.name);
+                    }
+                    selected.push(Entry {
+                        full_path: source.clone(),
+                        name: format!("{name}/"),
+                        kind: EntryKind::Directory,
+                    });
+                }
+                (selected, gitlinks, missing)
+            } else {
+                collect_entries(
+                    source.parent().unwrap_or(Path::new(".")),
+                    destination,
+                    vec![name.to_owned()],
+                    false,
+                )?
+            };
+        entries.append(&mut selected);
+        skipped_gitlinks += gitlinks;
+        skipped_missing += missing;
+    }
+    // ZIP readers on Windows are case-insensitive. Reject both duplicate
+    // names and a file that would shadow another entry's parent directory.
+    let mut names = HashMap::new();
+    for entry in &entries {
+        let name = entry.name.trim_end_matches('/').to_lowercase();
+        if names
+            .insert(name, matches!(entry.kind, EntryKind::Directory))
+            .is_some()
+        {
+            return Err(ToolError::new(
+                "justzip",
+                format!("conflicting archive name: {}", entry.name),
+            ));
+        }
+    }
+    for name in names.keys() {
+        let mut parent = name.as_str();
+        while let Some((prefix, _)) = parent.rsplit_once('/') {
+            if names.get(prefix) == Some(&false) {
+                return Err(ToolError::new(
+                    "justzip",
+                    format!("conflicting archive name: {name}"),
+                ));
+            }
+            parent = prefix;
+        }
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
     Ok((entries, skipped_gitlinks, skipped_missing))
 }
 
@@ -462,6 +663,12 @@ fn write_archive(
     let temporary_path = temporary.path().to_path_buf();
     let mut archive = zip::ZipWriter::new(temporary);
     for entry in entries {
+        if matches!(entry.kind, EntryKind::Directory) {
+            archive
+                .add_directory(&entry.name, SimpleFileOptions::default())
+                .map_err(|error| ToolError::new("justzip", error.to_string()))?;
+            continue;
+        }
         if let EntryKind::Symlink(target) = &entry.kind {
             let file_options = SimpleFileOptions::default()
                 .compression_method(CompressionMethod::Stored)
@@ -542,34 +749,24 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         println!("{HELP}");
         return Ok(());
     }
-    let source = resolved_directory(options.source.as_deref().unwrap_or_else(|| Path::new(".")))?;
-    let destination = destination(&source, options.output.as_deref())?;
-    let git = if let Some(requested) = std::env::var_os("GIT_BIN").filter(|value| !value.is_empty())
-    {
-        let path = PathBuf::from(&requested);
-        if path.is_file() {
-            path
-        } else {
-            let text = requested.to_str().ok_or_else(|| {
-                ToolError::new(
-                    "justzip",
-                    format!(
-                        "GIT_BIN points to a missing non-UTF-8 path: {}",
-                        path.to_string_lossy()
-                    ),
-                )
-            })?;
-            deps::require("justzip", text)?
-        }
+    let inputs = if options.sources.is_empty() {
+        vec![PathBuf::from(".")]
     } else {
-        deps::require("justzip", "git")?
+        options.sources
     };
-    let names = git_file_list(&git, &source)?;
-    let (entries, skipped_gitlinks, skipped_missing) =
-        collect_entries(&source, &destination, names)?;
+    let mut seen = HashSet::new();
+    let sources: Vec<_> = inputs
+        .iter()
+        .map(|path| resolved_source(path))
+        .collect::<ToolResult<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect();
+    let destination = destination(&sources, options.output.as_deref())?;
+    let (entries, skipped_gitlinks, skipped_missing) = archive_entries(&sources, &destination)?;
     if options.dry_run {
         println!(
-            "justzip: dry run — {} file(s) -> {} ({} compression)",
+            "justzip: dry run — {} entries -> {} ({} compression)",
             entries.len(),
             common::display_path(&destination),
             options.compression.name()
@@ -591,7 +788,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     let started = Instant::now();
     let bytes = write_archive(&entries, &destination, options.compression)?;
     println!(
-        "justzip: wrote {} — {} file(s), {} in {:.1}s",
+        "justzip: wrote {} — {} entries, {} in {:.1}s",
         common::display_path(&destination),
         entries.len(),
         common::format_bytes(bytes),
@@ -636,5 +833,7 @@ mod tests {
         assert!(!safe_symlink_target("current", Path::new("../secret")));
         assert!(!safe_symlink_target("current", Path::new("./../secret")));
         assert!(!safe_symlink_target("current", Path::new("/etc/passwd")));
+        assert!(!safe_symlink_target("current", Path::new(r"..\secret")));
+        assert!(!safe_symlink_target("current", Path::new(r"C:\secret")));
     }
 }
