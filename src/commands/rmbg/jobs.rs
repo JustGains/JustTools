@@ -147,6 +147,12 @@ pub fn reject_model_overwrite(jobs: &[Job], model: &Path) -> ToolResult {
     Ok(())
 }
 
+/// Whether two paths name the same file, using the identity that guards batch
+/// outputs; `right` need not exist yet.
+pub fn same_path(left: &Path, right: &Path) -> ToolResult<bool> {
+    Ok(path_key(left)? == path_key(right)?)
+}
+
 fn reject_collisions(jobs: &[Job]) -> ToolResult {
     let inputs = jobs
         .iter()

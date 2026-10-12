@@ -728,6 +728,33 @@ fn rmbg_rejects_relative_runtime_override() {
 }
 
 #[test]
+fn rmbg_serve_rejects_image_inputs_as_usage_error() {
+    let result = run(&["rmbg", "--serve", "photo.png"]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(result.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("--serve cannot be combined"), "{stderr}");
+}
+
+#[test]
+fn rmbg_serve_startup_failure_never_reports_ready() {
+    let result = Command::new(binary())
+        .args(["rmbg", "--serve", "--provider", "cpu"])
+        .env("ORT_DYLIB_PATH", "onnxruntime.dll")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        result.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("must be an absolute path"), "{stderr}");
+}
+
+#[test]
 fn missing_dependency_never_installs_without_a_terminal() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("clip.mp4");

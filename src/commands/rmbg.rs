@@ -1,12 +1,16 @@
+mod host;
 mod image_pipeline;
 mod jobs;
 mod model;
 mod runtime;
+mod serve;
 
 use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+use image::codecs::png::CompressionType;
 
 use crate::error::{ToolError, ToolResult};
 
@@ -19,6 +23,7 @@ const HELP: &str = r#"justrmbg — Remove image backgrounds locally with BRIA RM
 Usage:
   justrmbg <image> [more images...] [options]
   justrmbg <inputDir> -o <outputDir>
+  justrmbg --serve [--provider EP | --cpu | --gpu] [--model PATH] [--download]
   rmbg <image> [more images...] [options]
 
 Options:
@@ -29,6 +34,7 @@ Options:
       --check        Check runtime and acceleration without downloading the model
       --download     Install pinned managed runtime/model without a second prompt
       --model PATH   ONNX model path (or set RMBG_MODEL)
+      --serve        Keep the model loaded and answer JSON requests from stdin
   -h, --help         Show this help
 
 Default output is <input>-nobg.png beside the input. Inputs are always kept;
@@ -36,6 +42,8 @@ existing outputs are replaced atomically. For one input, --output is an exact
 file; for multiple inputs or one directory, it is an output directory. Auto
 mode uses managed DirectML on Windows x64 when available and may use CPU for
 unsupported model nodes; if acceleration fails, it visibly falls back to CPU.
+GPU runs use rmbg-2.0-fp16.onnx beside the managed model when it is there and
+matches its pinned SHA-256 (see docs/rmbg.md).
 Linux CUDA and macOS CoreML use a provider-enabled runtime supplied through
 ORT_DYLIB_PATH.
 
@@ -43,6 +51,16 @@ The launcher enables --download visibly, so choosing Run installs a missing
 managed runtime/model automatically. Headless runs must pass --download or
 confirm interactively. Downloads use pinned sizes and SHA-256 hashes and are
 cached per user.
+
+--serve is for long-running callers. It loads the model once, prints
+{"ready":true,"provider":"DirectML","load_seconds":9.1} on stdout, then reads
+one JSON request per stdin line, {"id":"1","input":"in.jpg","output":"out.png"},
+and answers each in order with one line: {"id":"1","ok":true,"output":
+"<absolute path>","seconds":0.42,"stages":{...}} or {"id":"1","ok":false,
+"error":"..."}. Send requests without waiting for answers: the next image is
+decoded and the last one saved while the model runs. Its PNGs favor speed
+over size. The output folder must exist and the input is never overwritten.
+Stdout carries only these lines; status goes to stderr. End of input exits 0.
 
 Run bare to open the interactive launcher. Its Headless footer shows the
 equivalent direct command; explicit arguments bypass the UI."#;
@@ -98,6 +116,7 @@ struct Options {
     check: bool,
     download: bool,
     model: Option<PathBuf>,
+    serve: bool,
     help: bool,
 }
 
@@ -165,6 +184,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
         check: false,
         download: false,
         model: None,
+        serve: false,
         help: false,
     };
     let mut positional = false;
@@ -204,6 +224,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
                 "--gpu" => set_provider(&mut options, Provider::platform_gpu(), option)?,
                 "--check" => options.check = true,
                 "--download" => options.download = true,
+                "--serve" => options.serve = true,
                 _ if text.is_some_and(|value| value.starts_with('-')) => {
                     return Err(ToolError::usage(
                         TOOL,
@@ -218,7 +239,25 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
         index += 1;
     }
 
-    if !options.help && !options.check && options.inputs.is_empty() {
+    if options.serve {
+        // Serve mode takes its images from stdin requests, one at a time.
+        let conflict = if options.check {
+            Some("--check")
+        } else if options.output.is_some() {
+            Some("--output")
+        } else if !options.inputs.is_empty() {
+            Some("image inputs")
+        } else {
+            None
+        };
+        if let Some(conflict) = conflict {
+            return Err(ToolError::usage(
+                TOOL,
+                format!("--serve cannot be combined with {conflict}"),
+            ));
+        }
+    }
+    if !options.help && !options.check && !options.serve && options.inputs.is_empty() {
         return Err(ToolError::usage(
             TOOL,
             "at least one image or folder is required (or use --check)",
@@ -244,6 +283,10 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     if options.help {
         println!("{HELP}");
         return Ok(());
+    }
+
+    if options.serve {
+        return serve::run(options.provider, options.download, options.model.as_deref());
     }
 
     if options.check {
@@ -281,16 +324,21 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     let model_path = model::resolve(options.model.as_deref(), options.download)?;
     status(&format!("Model: {}", model_path.display()));
     jobs::reject_model_overwrite(&job_set.jobs, &model_path)?;
+    let half = model::half_precision(options.model.as_deref(), &model_path, options.provider);
+    if let Some(half) = &half {
+        jobs::reject_model_overwrite(&job_set.jobs, half)?;
+    }
 
     let load_started = Instant::now();
-    let (mut engine, attempts) = Engine::create(&model_path, options.provider, &runtime)?;
+    let (mut engine, attempts) =
+        Engine::create(&model_path, half.as_deref(), options.provider, &runtime)?;
     for attempt in attempts {
         eprintln!("{TOOL}: {attempt}");
     }
     status(&format!(
         "Model loaded in {:.1}s — selected provider: {}",
         load_started.elapsed().as_secs_f64(),
-        engine.provider().name()
+        provider_label(&engine)
     ));
 
     let piped = !io::stdout().is_terminal();
@@ -303,6 +351,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             options.provider,
             &job.input,
             &job.output,
+            status,
         ) {
             if !job_set.batch_mode {
                 return Err(error);
@@ -339,17 +388,34 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     Ok(())
 }
 
+/// Removes one image's background.
 fn process_job(
     engine: &mut Engine,
     model_path: &Path,
     provider: Provider,
     input: &Path,
     output: &Path,
+    report: fn(&str),
 ) -> ToolResult {
     // Decode first so corrupt inputs never trigger GPU-to-CPU fallback.
-    let prepared = PreparedImage::load(input)?;
-    let mask = match engine.infer(&prepared.chw) {
-        Ok(mask) => mask,
+    let prepared = PreparedImage::load(input, engine.size())?;
+    let mask = infer_with_fallback(engine, model_path, provider, &prepared.chw, report)?;
+    prepared.write_with_mask(&mask, output, CompressionType::Default)
+}
+
+/// Runs the model on one prepared image. When Auto's GPU inference fails, the
+/// engine moves to the CPU (with the full model) for this and every later image.
+/// `report` receives human status lines, so serve mode can keep them off its
+/// stdout protocol channel.
+fn infer_with_fallback(
+    engine: &mut Engine,
+    model_path: &Path,
+    provider: Provider,
+    chw: &[f32],
+    report: fn(&str),
+) -> ToolResult<Vec<f32>> {
+    match engine.infer(chw) {
+        Ok(mask) => Ok(mask),
         Err(gpu_error) if provider == Provider::Auto && engine.is_gpu() => {
             eprintln!(
                 "{TOOL}: {} inference failed — falling back to CPU.\n{}",
@@ -357,12 +423,20 @@ fn process_job(
                 gpu_error.message()
             );
             engine.replace_with_cpu(model_path)?;
-            status("Provider changed to CPU for this and remaining images");
-            engine.infer(&prepared.chw)?
+            report("Provider changed to CPU for this and remaining images");
+            engine.infer(chw)
         }
-        Err(error) => return Err(error),
-    };
-    prepared.write_with_mask(&mask, output)
+        Err(error) => Err(error),
+    }
+}
+
+/// The provider's name, noting the half-precision model.
+fn provider_label(engine: &Engine) -> String {
+    if engine.is_half_precision() {
+        format!("{} (half precision)", engine.provider().name())
+    } else {
+        engine.provider().name().to_owned()
+    }
 }
 
 fn status(message: &str) {
@@ -434,5 +508,46 @@ mod tests {
     #[test]
     fn help_needs_no_input() {
         assert!(parse(vec!["--help".into()]).unwrap().help);
+    }
+
+    #[test]
+    fn serve_needs_no_input_and_accepts_runtime_options() {
+        let options = parse(vec!["--serve".into()]).unwrap();
+        assert!(options.serve);
+        assert!(options.inputs.is_empty());
+        assert_eq!(options.provider, Provider::Auto);
+
+        let options = parse(vec![
+            "--serve".into(),
+            "--provider".into(),
+            "directml".into(),
+            "--model".into(),
+            "custom.onnx".into(),
+            "--download".into(),
+        ])
+        .unwrap();
+        assert!(options.serve && options.download);
+        assert_eq!(options.provider, Provider::DirectMl);
+        assert_eq!(options.model, Some(PathBuf::from("custom.onnx")));
+
+        for alias in ["--cpu", "--gpu", "--provider=cpu", "--model=m.onnx"] {
+            assert!(parse(vec!["--serve".into(), alias.into()]).unwrap().serve);
+        }
+    }
+
+    #[test]
+    fn serve_rejects_inputs_output_and_check() {
+        for args in [
+            vec!["--serve", "photo.jpg"],
+            vec!["photo.jpg", "--serve"],
+            vec!["--serve", "--", "photo.jpg"],
+            vec!["--serve", "-o", "out.png"],
+            vec!["--serve", "--output=out.png"],
+            vec!["--serve", "--check"],
+        ] {
+            let error = parse(args.iter().map(OsString::from).collect()).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{args:?}");
+            assert!(error.message().contains("--serve"), "{args:?}");
+        }
     }
 }

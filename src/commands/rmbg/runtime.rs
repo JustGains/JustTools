@@ -17,7 +17,8 @@ use tempfile::NamedTempFile;
 use crate::error::{ToolError, ToolResult};
 
 use super::Provider;
-use super::image_pipeline::MODEL_SIZE;
+use super::host;
+use super::image_pipeline::ModelSize;
 
 const TOOL: &str = "justrmbg";
 static INITIALIZED_RUNTIME: OnceLock<PathBuf> = OnceLock::new();
@@ -1055,15 +1056,32 @@ pub struct Engine {
     session: Option<Session>,
     provider: Provider,
     uses_cpu_support: bool,
+    half_precision: bool,
+    size: ModelSize,
 }
 
 impl Engine {
+    /// Loads `model`, or `half` on a GPU provider when one is given.
     pub fn create(
         model: &Path,
+        half: Option<&Path>,
         requested: Provider,
         runtime: &RuntimeInfo,
     ) -> ToolResult<(Self, Vec<String>)> {
         let mut attempts = runtime.attempts.clone();
+        if let Some(cores) = host::fast_cores() {
+            attempts.push(format!(
+                "using the {} fast cores ({}) of this CPU",
+                cores.len(),
+                host::describe(cores)
+            ));
+        }
+        if host::low_memory() {
+            attempts.push(
+                "less than 8 GB of memory: CPU inference allocates each tensor as it is needed"
+                    .to_owned(),
+            );
+        }
         for provider in runtime.providers.iter().copied() {
             if provider == Provider::Cpu {
                 return Ok((Self::cpu(model)?, attempts));
@@ -1082,7 +1100,23 @@ impl Engine {
                 continue;
             }
             let allow_cpu_support = requested == Provider::Auto;
-            match Self::with_provider_file(model, provider, allow_cpu_support) {
+            let loaded = match half {
+                Some(half) => Self::with_provider_file(half, provider, allow_cpu_support)
+                    .map(|engine| Self {
+                        half_precision: true,
+                        ..engine
+                    })
+                    .or_else(|error| {
+                        attempts.push(format!(
+                            "{} cannot run the half-precision model: {}; using the full model",
+                            provider.name(),
+                            error.message()
+                        ));
+                        Self::with_provider_file(model, provider, allow_cpu_support)
+                    }),
+                None => Self::with_provider_file(model, provider, allow_cpu_support),
+            };
+            match loaded {
                 Ok(engine) => {
                     if engine.uses_cpu_support {
                         attempts.push(format!(
@@ -1123,9 +1157,11 @@ impl Engine {
             )
         })?;
         Ok(Self {
+            size: declared_size(&session),
             session: Some(session),
             provider,
             uses_cpu_support: provider != Provider::Cpu && allow_cpu_support,
+            half_precision: false,
         })
     }
 
@@ -1142,9 +1178,11 @@ impl Engine {
             )
         })?;
         Ok(Self {
+            size: declared_size(&session),
             session: Some(session),
             provider,
             uses_cpu_support: provider != Provider::Cpu && allow_cpu_support,
+            half_precision: false,
         })
     }
 
@@ -1152,19 +1190,36 @@ impl Engine {
         self.provider
     }
 
+    /// The image size the model takes.
+    pub fn size(&self) -> ModelSize {
+        self.size
+    }
+
+    /// Whether the loaded model is the half-precision copy.
+    pub fn is_half_precision(&self) -> bool {
+        self.half_precision
+    }
+
     pub fn is_gpu(&self) -> bool {
         self.provider != Provider::Cpu
     }
 
     pub fn replace_with_cpu(&mut self, model: &Path) -> ToolResult {
+        let size = self.size;
         self.session.take();
         let cpu = Self::cpu(model)?;
+        if cpu.size != size {
+            return Err(ToolError::new(
+                TOOL,
+                "the CPU model takes a different image size than the GPU model",
+            ));
+        }
         *self = cpu;
         Ok(())
     }
 
     pub fn infer(&mut self, chw: &[f32]) -> ToolResult<Vec<f32>> {
-        let expected = (3 * MODEL_SIZE * MODEL_SIZE) as usize;
+        let expected = 3 * self.size.pixels();
         if chw.len() != expected {
             return Err(ToolError::new(
                 TOOL,
@@ -1175,7 +1230,12 @@ impl Engine {
             ));
         }
         let input = Tensor::from_array((
-            [1_usize, 3, MODEL_SIZE as usize, MODEL_SIZE as usize],
+            [
+                1_usize,
+                3,
+                self.size.height as usize,
+                self.size.width as usize,
+            ],
             chw.to_vec().into_boxed_slice(),
         ))
         .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
@@ -1222,6 +1282,15 @@ fn configure_provider(
     allow_cpu_support: bool,
 ) -> ToolResult<ort::session::builder::SessionBuilder> {
     let dispatch = match provider {
+        Provider::Cpu if host::low_memory() => {
+            // Each tensor is allocated as it is needed (see host::low_memory).
+            let builder = builder
+                .with_memory_pattern(false)
+                .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
+            return builder
+                .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])
+                .map_err(|error| ToolError::new(TOOL, error.to_string()));
+        }
         Provider::Cpu => return Ok(builder),
         Provider::Cuda => ep::CUDA::default().build().error_on_failure(),
         Provider::DirectMl => ep::DirectML::default().build().error_on_failure(),
@@ -1253,9 +1322,31 @@ fn session_builder() -> ToolResult<ort::session::builder::SessionBuilder> {
     let builder = builder
         .with_optimization_level(GraphOptimizationLevel::All)
         .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
+    let builder = match host::fast_cores() {
+        Some(cores) => builder
+            .with_intra_threads(cores.len())
+            .map_err(|error| ToolError::new(TOOL, error.to_string()))?,
+        None => builder,
+    };
     builder
         .with_parallel_execution(false)
         .map_err(|error| ToolError::new(TOOL, error.to_string()))
+}
+
+/// The image size a model declares, or the default when its height and width
+/// are left open (BRIA's model takes any size).
+fn declared_size(session: &Session) -> ModelSize {
+    let shape = session
+        .inputs()
+        .first()
+        .and_then(|input| input.dtype().tensor_shape());
+    match shape.map(|shape| &shape[..]) {
+        Some(&[_, _, height, width]) if height > 0 && width > 0 => ModelSize {
+            width: u32::try_from(width).unwrap_or(ModelSize::DEFAULT.width),
+            height: u32::try_from(height).unwrap_or(ModelSize::DEFAULT.height),
+        },
+        _ => ModelSize::DEFAULT,
+    }
 }
 
 fn requested_providers(requested: Provider) -> ToolResult<Vec<Provider>> {

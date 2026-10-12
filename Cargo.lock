@@ -1705,6 +1705,7 @@ dependencies = [
  "jpeg-encoder",
  "justtools-core",
  "justtools-menu",
+ "libc",
  "netstat2",
  "ort",
  "predicates",

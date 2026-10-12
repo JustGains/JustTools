@@ -11,6 +11,8 @@ use zip::ZipArchive;
 
 use crate::error::{ToolError, ToolResult};
 
+use super::Provider;
+
 const TOOL: &str = "justrmbg";
 const MODEL_NAME: &str = "rmbg-2.0.onnx";
 const MODEL_URL: &str = "https://m.justgains.com/tools/rmbg-2.0.zip";
@@ -18,6 +20,11 @@ const ARCHIVE_SHA256: &str = "03c1978e7838e997601c81cd89e912403a322a63a49a2bfe93
 const MODEL_SHA256: &str = "5b486f08200f513f460da46dd701db5fbb47d79b4be4b708a19444bcd4e79958";
 const MAX_ARCHIVE_BYTES: u64 = 1_100_000_000;
 const MAX_MODEL_BYTES: u64 = 1_200_000_000;
+/// The managed model in half precision, made with onnxconverter-common 1.16.0
+/// and onnx 1.23.2 (see docs/rmbg.md). It is never downloaded.
+const HALF_MODEL_NAME: &str = "rmbg-2.0-fp16.onnx";
+const HALF_MODEL_SHA256: &str = "3f281cbac29e7a95eddd424ef565ea3cff88fe75546fe09901bd571fcdb3e2d4";
+const MAX_HALF_MODEL_BYTES: u64 = 700_000_000;
 
 pub fn resolve(explicit: Option<&Path>, download_approved: bool) -> ToolResult<PathBuf> {
     if let Some(explicit) = explicit {
@@ -88,9 +95,53 @@ fn require_override(path: &Path, source: &str) -> ToolResult<PathBuf> {
     }
 }
 
+/// The half-precision copy beside a managed model, for GPU providers: on
+/// DirectML it cuts out in about half the time and memory with the same masks.
+/// An explicit model (`--model`, `RMBG_MODEL`) is always used as given, and a
+/// copy that fails its pinned SHA-256 is skipped with a warning.
+pub fn half_precision(
+    explicit: Option<&Path>,
+    model: &Path,
+    provider: Provider,
+) -> Option<PathBuf> {
+    let overridden =
+        explicit.is_some() || env::var_os("RMBG_MODEL").is_some_and(|value| !value.is_empty());
+    if overridden || provider == Provider::Cpu {
+        return None;
+    }
+    verified_beside(
+        model,
+        HALF_MODEL_NAME,
+        MAX_HALF_MODEL_BYTES,
+        HALF_MODEL_SHA256,
+    )
+}
+
+fn verified_beside(model: &Path, name: &str, max_bytes: u64, expected: &str) -> Option<PathBuf> {
+    let path = model.with_file_name(name);
+    if !path.is_file() {
+        return None;
+    }
+    match verify_file(&path, max_bytes, expected) {
+        Ok(()) => Some(path),
+        Err(error) => {
+            eprintln!("{TOOL}: not using {name}: {}", error.message());
+            None
+        }
+    }
+}
+
 fn verify_existing_model(path: &Path) -> ToolResult {
+    verify_file(
+        path,
+        MAX_MODEL_BYTES,
+        &expected_hash("RMBG_MODEL_SHA256", MODEL_SHA256)?,
+    )
+}
+
+fn verify_file(path: &Path, max_bytes: u64, expected: &str) -> ToolResult {
     let metadata = fs::metadata(path).map_err(|error| ToolError::new(TOOL, error.to_string()))?;
-    if metadata.len() == 0 || metadata.len() > MAX_MODEL_BYTES {
+    if metadata.len() == 0 || metadata.len() > max_bytes {
         return Err(ToolError::new(
             TOOL,
             format!("model has an invalid size: {}", path.display()),
@@ -111,7 +162,6 @@ fn verify_existing_model(path: &Path) -> ToolResult {
         hasher.update(&buffer[..count]);
     }
     let actual = format!("{:x}", hasher.finalize());
-    let expected = expected_hash("RMBG_MODEL_SHA256", MODEL_SHA256)?;
     if actual != expected {
         return Err(ToolError::new(
             TOOL,
@@ -366,8 +416,45 @@ mod tests {
     use zip::{CompressionMethod, ZipWriter};
 
     #[test]
+    fn half_precision_is_only_for_gpus_with_a_managed_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join(MODEL_NAME);
+        fs::write(&model, b"full").unwrap();
+        assert_eq!(half_precision(None, &model, Provider::DirectMl), None);
+        fs::write(
+            model.with_file_name(HALF_MODEL_NAME),
+            b"not the pinned model",
+        )
+        .unwrap();
+        for (explicit, provider) in [
+            (None, Provider::DirectMl),
+            (None, Provider::Cpu),
+            (Some(model.as_path()), Provider::DirectMl),
+        ] {
+            assert_eq!(half_precision(explicit, &model, provider), None);
+        }
+    }
+
+    #[test]
+    fn a_copy_beside_the_model_is_used_only_when_verified() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join(MODEL_NAME);
+        let bytes = b"half precision test model";
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        assert_eq!(verified_beside(&model, "half.onnx", 100, &hash), None);
+        let half = directory.path().join("half.onnx");
+        fs::write(&half, bytes).unwrap();
+        assert_eq!(verified_beside(&model, "half.onnx", 100, &hash), Some(half));
+        assert_eq!(
+            verified_beside(&model, "half.onnx", 100, MODEL_SHA256),
+            None
+        );
+        assert_eq!(verified_beside(&model, "half.onnx", 10, &hash), None);
+    }
+
+    #[test]
     fn pinned_hashes_are_well_formed() {
-        for hash in [ARCHIVE_SHA256, MODEL_SHA256] {
+        for hash in [ARCHIVE_SHA256, MODEL_SHA256, HALF_MODEL_SHA256] {
             assert_eq!(hash.len(), 64);
             assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }

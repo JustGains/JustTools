@@ -148,8 +148,10 @@ Use `--output` for copies or explicit `--replace` when replacement is intended.
 `justrmbg` automatically acquires its checksum-pinned ONNX Runtime and BRIA
 RMBG-2.0 model when launched interactively. Headless automation grants the same
 permission with `--download`; `justrmbg --check` tests the runtime first without
-downloading the model. BRIA's model weights require a separate license for
-commercial use.
+downloading the model. Programs can keep the model loaded with
+`justrmbg --serve`, which answers JSON requests from stdin one per line; see the
+[JustRMBG guide](docs/rmbg.md). BRIA's model weights require a separate license
+for commercial use.
 
 `justpdf images guide.pdf` saves every embedded image, copying JPEGs unchanged
 and keeping transparency as PNG. `justlinks guide.pdf plan.xlsx --csv` writes
@@ -159,7 +161,7 @@ short, Shorts, live, and embed URLs merge into one clean video link without
 timestamps, tracking, or playlist parameters.
 
 For complete behavior, see the [console UI](docs/console-ui.md),
-[context menu](docs/context-menu.md), [JustZip](docs/zip.md), [JustPaste](docs/paste.md), [JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustPorts](docs/ports.md), [JustIP](docs/ip.md),
+[context menu](docs/context-menu.md), [JustZip](docs/zip.md), [JustPaste](docs/paste.md), [JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustRMBG](docs/rmbg.md), [JustPorts](docs/ports.md), [JustIP](docs/ip.md),
 [bunt](docs/bunt.md), [JustCommit](docs/commit.md), [media downloads](docs/downloads.md), and
 [JustReady](docs/ready.md) guides.
 

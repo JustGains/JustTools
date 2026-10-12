@@ -227,6 +227,7 @@ justrmbg portrait.jpg --download
 justrmbg --check
 justrmbg --check --gpu
 justrmbg portrait.jpg --provider cpu
+justrmbg --serve
 ```
 
 The default `auto` provider prefers acceleration. It reports when CPU supports
@@ -252,6 +253,18 @@ Multiple explicit images form a batch and a supplied `--output` is then a
 directory. RMBG continues after per-file failures, reports totals, and exits
 nonzero if any file failed. It has no `--dry-run` or `--recursive`; use
 `--check` as runtime preflight and review explicit file/directory mappings.
+
+`justrmbg --serve` is for programs that keep the model loaded, not one-off
+edits. It prints `{"ready":true,"provider":...,"load_seconds":...}`, then
+answers each stdin line `{"id":"1","input":"in.jpg","output":"out.png"}` with
+one JSON line in order: `ok`, absolute `output`, `seconds` and `stages`, or
+`error`. Send requests without waiting for answers; the server decodes and
+saves other images while the model runs. The output folder must exist, inputs
+are never overwritten, and closing stdin exits 0. GPU runs use a verified
+`rmbg-2.0-fp16.onnx` beside the managed model when present. A model with a
+fixed input size runs at that size; below 8 GB of memory CPU inference trades
+speed for memory, and on Linux CPUs with fast and slow cores justrmbg uses only
+the fast ones. See `docs/rmbg.md`.
 
 ## Common batch pattern
 
