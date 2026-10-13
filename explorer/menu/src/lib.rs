@@ -471,6 +471,8 @@ fn file_items(selection: &Selection, items: &mut Vec<Item>) {
             ));
         }
         for (label, id) in [
+            ("compress", "pdf.compress"),
+            ("compress smallest", "pdf.compress.smallest"),
             ("split into pages", "pdf.split"),
             ("save embedded images", "pdf.images"),
             ("save links", "pdf.links"),
@@ -647,6 +649,18 @@ const ACTIONS: &[Action] = &[
     Action {
         minimum: 2,
         ..headless("pdf.merge", Tool::Pdf, &["merge"])
+    },
+    Action {
+        hold: true,
+        ..headless("pdf.compress", Tool::Pdf, &["compress"])
+    },
+    Action {
+        hold: true,
+        ..headless(
+            "pdf.compress.smallest",
+            Tool::Pdf,
+            &["compress", "--level", "smallest"],
+        )
     },
     Action {
         per_file: true,
@@ -826,7 +840,9 @@ mod tests {
     #[test]
     fn merge_needs_two_pdfs_and_single_input_operations_run_per_file() {
         let one = menu(&selection(&["a.pdf"]));
-        assert_eq!(one[0].title, "JustPDF · split into pages");
+        assert_eq!(one[0].title, "JustPDF · compress");
+        assert_eq!(one[1].title, "JustPDF · compress smallest");
+        assert_eq!(one[2].title, "JustPDF · split into pages");
         let two = menu(&selection(&["a.pdf", "b.pdf"]));
         assert_eq!(two[0].title, "JustPDF · merge 2 PDFs");
         assert_eq!(action("pdf.merge").unwrap().minimum, 2);

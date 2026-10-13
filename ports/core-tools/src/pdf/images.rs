@@ -33,7 +33,7 @@ const CODECS: [&[u8]; 4] = [
     b"CCITTFaxDecode",
 ];
 /// General-purpose filters that lopdf decodes.
-const TRANSPORTS: [&[u8]; 3] = [b"FlateDecode", b"LZWDecode", b"ASCII85Decode"];
+pub(super) const TRANSPORTS: [&[u8]; 3] = [b"FlateDecode", b"LZWDecode", b"ASCII85Decode"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Render {
@@ -59,13 +59,13 @@ struct Planned {
     path: PathBuf,
 }
 
-struct Filter {
-    name: Vec<u8>,
-    params: Option<Dictionary>,
+pub(super) struct Filter {
+    pub(super) name: Vec<u8>,
+    pub(super) params: Option<Dictionary>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Color {
+pub(super) enum Color {
     Gray,
     Rgb,
     Cmyk,
@@ -87,11 +87,11 @@ impl Color {
 }
 
 /// Decoded 8-bit gray or RGB pixels with optional straight alpha.
-struct Picture {
-    width: u32,
-    height: u32,
-    channels: usize,
-    pixels: Vec<u8>,
+pub(super) struct Picture {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) channels: usize,
+    pub(super) pixels: Vec<u8>,
     alpha: Option<Vec<u8>>,
     icc: Option<Vec<u8>>,
 }
@@ -375,18 +375,18 @@ fn has_mask(document: &Document, id: ObjectId) -> bool {
         .is_ok_and(|stream| stream.dict.has(b"SMask") || stream.dict.has(b"Mask"))
 }
 
-fn name_entry<'a>(dictionary: &'a Dictionary, key: &[u8]) -> Option<&'a [u8]> {
+pub(super) fn name_entry<'a>(dictionary: &'a Dictionary, key: &[u8]) -> Option<&'a [u8]> {
     dictionary.get(key).and_then(Object::as_name).ok()
 }
 
-fn is_stencil(dictionary: &Dictionary) -> bool {
+pub(super) fn is_stencil(dictionary: &Dictionary) -> bool {
     dictionary
         .get(b"ImageMask")
         .and_then(Object::as_bool)
         .unwrap_or(false)
 }
 
-fn dimensions(dictionary: &Dictionary) -> Result<(u32, u32)> {
+pub(super) fn dimensions(dictionary: &Dictionary) -> Result<(u32, u32)> {
     let read = |key: &[u8]| {
         dictionary
             .get(key)
@@ -401,7 +401,7 @@ fn dimensions(dictionary: &Dictionary) -> Result<(u32, u32)> {
     }
 }
 
-fn bits_per_component(dictionary: &Dictionary) -> Result<usize> {
+pub(super) fn bits_per_component(dictionary: &Dictionary) -> Result<usize> {
     dictionary
         .get(b"BitsPerComponent")
         .and_then(Object::as_i64)
@@ -411,7 +411,7 @@ fn bits_per_component(dictionary: &Dictionary) -> Result<usize> {
         .ok_or_else(|| anyhow!("unsupported bits per component"))
 }
 
-fn filters(document: &Document, dictionary: &Dictionary) -> Result<Vec<Filter>> {
+pub(super) fn filters(document: &Document, dictionary: &Dictionary) -> Result<Vec<Filter>> {
     let resolve = |object| resolve_object(document, object).unwrap_or(object);
     let names = match dictionary.get(b"Filter").map(resolve) {
         Err(_) => Vec::new(),
@@ -441,7 +441,7 @@ fn filters(document: &Document, dictionary: &Dictionary) -> Result<Vec<Filter>> 
 }
 
 /// The final filter when it yields a complete encoded image.
-fn codec(filters: &[Filter]) -> Option<&[u8]> {
+pub(super) fn codec(filters: &[Filter]) -> Option<&[u8]> {
     filters
         .last()
         .map(|filter| filter.name.as_slice())
@@ -470,13 +470,13 @@ fn decode_filters(content: &[u8], filters: &[Filter], limit: usize) -> Result<Ve
 }
 
 /// The encoded JPEG or JPEG 2000 file inside a codec-filtered stream.
-fn payload(stream: &Stream, filters: &[Filter]) -> Result<Vec<u8>> {
+pub(super) fn payload(stream: &Stream, filters: &[Filter]) -> Result<Vec<u8>> {
     let transport = &filters[..filters.len().saturating_sub(1)];
     decode_filters(&stream.content, transport, MAX_DECODED_BYTES)
 }
 
 /// Decodes raw samples, one `u16` per component, from byte-aligned rows.
-fn samples(
+pub(super) fn samples(
     stream: &Stream,
     filters: &[Filter],
     (width, height): (u32, u32),
@@ -543,7 +543,7 @@ fn decode_ranges(dictionary: &Dictionary, components: usize, default_max: f64) -
         .collect()
 }
 
-fn color_space(
+pub(super) fn color_space(
     document: &Document,
     space: &Object,
     depth: usize,
@@ -801,7 +801,7 @@ fn mask_alpha(
     ))
 }
 
-fn decode_jpeg(bytes: &[u8]) -> Result<Picture> {
+pub(super) fn decode_jpeg(bytes: &[u8]) -> Result<Picture> {
     let mut decoder = JpegDecoder::new(Cursor::new(bytes)).context("could not read JPEG")?;
     let icc = decoder.icc_profile().ok().flatten();
     let image = DynamicImage::from_decoder(decoder).context("could not decode JPEG")?;

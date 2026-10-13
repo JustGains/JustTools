@@ -529,7 +529,11 @@ impl App {
             "justcommit" if !self.enabled("repair") => id == "repair_agent",
             "justpdf" => match id {
                 "degrees" => self.value("operation") != "rotate",
-                "pages" => matches!(self.value("operation"), "auto" | "merge" | "split" | "info"),
+                "level" => self.value("operation") != "compress",
+                "pages" => matches!(
+                    self.value("operation"),
+                    "auto" | "merge" | "split" | "info" | "compress"
+                ),
                 _ => false,
             },
             _ => false,
@@ -793,10 +797,17 @@ impl App {
                     ("images", false) => inside("p001-01.jpg|png"),
                     ("links", true) => "beside the PDF as <name>-links.txt".into(),
                     ("links", false) => format!("{} (a folder gets <name>-links.txt)", chosen()),
+                    ("compress", true) => "beside each PDF as <name>-compressed.pdf".into(),
+                    ("compress", false) => {
+                        format!("{} (a folder gets <name>-compressed.pdf)", chosen())
+                    }
                     _ => chosen(),
                 };
                 let overwrite = match operation {
                     "info" => "Overwrite: nothing is written.",
+                    "compress" => {
+                        "Overwrite: PDF kept; written only when smaller; existing outputs need confirmation."
+                    }
                     "images" => {
                         "Overwrite: PDF kept; JPEGs copied as-is, transparent/raw images as PNG; existing files need confirmation."
                     }
@@ -1988,7 +1999,7 @@ fn spec(name: &str) -> Option<Tool> {
                 choices(
                     "operation",
                     "Operation",
-                    "Auto: info for one PDF, merge for several. Images: every embedded image. Links: unique URLs in a .txt file, one per line.",
+                    "Auto: info for one PDF, merge for several. Images: every embedded image. Links: unique URLs in a .txt file, one per line. Compress: a smaller copy of each PDF.",
                     "auto",
                     vec![
                         choice("Auto", "auto", &[]),
@@ -1999,6 +2010,7 @@ fn spec(name: &str) -> Option<Tool> {
                         choice("Info", "info", &["info"]),
                         choice("Images", "images", &["images"]),
                         choice("Links", "links", &["links"]),
+                        choice("Compress", "compress", &["compress"]),
                     ],
                 ),
                 input(
@@ -2011,7 +2023,7 @@ fn spec(name: &str) -> Option<Tool> {
                 text(
                     "output",
                     "Output",
-                    "PDF path, Split/Images folder, or Links .txt path. Blank writes beside the PDF.",
+                    "PDF path, Split/Images folder, Links .txt path, or Compress file or folder. Blank writes beside the PDF.",
                     "",
                     "--output",
                     true,
@@ -2033,6 +2045,17 @@ fn spec(name: &str) -> Option<Tool> {
                         choice("90 degrees", "90", &[]),
                         choice("180 degrees", "180", &["--degrees", "180"]),
                         choice("270 degrees", "270", &["--degrees", "270"]),
+                    ],
+                ),
+                choices(
+                    "level",
+                    "Compression",
+                    "Compress only. Balanced: images at most 150 ppi, JPEG quality 75. Smallest: 96 ppi, quality 50. Lossless keeps every image byte.",
+                    "balanced",
+                    vec![
+                        choice("Balanced", "balanced", &[]),
+                        choice("Smallest", "smallest", &["--level", "smallest"]),
+                        choice("Lossless", "lossless", &["--level", "lossless"]),
                     ],
                 ),
                 toggle(
@@ -2866,6 +2889,27 @@ mod tests {
             app.command(),
             "justpdf merge guide.pdf --output links_output.txt"
         );
+    }
+
+    #[test]
+    fn pdf_launcher_compresses_beside_the_pdf_at_the_chosen_level() {
+        let mut app = app_for("justpdf");
+        set(&mut app, "input", "guide.pdf; plan.pdf");
+        set(&mut app, "pages", "2-3");
+        set(&mut app, "operation", "compress");
+        assert_eq!(app.command(), "justpdf compress guide.pdf plan.pdf");
+        let (output, overwrite) = app.output_policy();
+        assert!(output.contains("<name>-compressed.pdf"));
+        assert!(overwrite.contains("PDF kept") && overwrite.contains("only when smaller"));
+
+        set(&mut app, "level", "smallest");
+        assert_eq!(
+            app.command(),
+            "justpdf compress guide.pdf plan.pdf --level smallest"
+        );
+        // A saved level never leaks into other operations.
+        set(&mut app, "operation", "split");
+        assert_eq!(app.command(), "justpdf split guide.pdf plan.pdf");
     }
 
     #[test]

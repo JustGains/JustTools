@@ -20,7 +20,7 @@ No elevation is needed and nothing outside the current user is changed.
 | Video (`.mp4 .mov .mkv .avi .webm` …) | **JustVideo** at 480p, 720p, 1080p, 1440p, 4K, or source resolution, plus more options…; **JustMP3**, **JustAudio**, **JustWAV** to extract the soundtrack |
 | Audio (`.mp3 .wav .flac .m4a .ogg` …) | **JustMP3**, **JustAudio**, **JustWAV**, minus the format the file already has |
 | Image (`.jpg .png .webp .bmp .tif .qoi`) | **JustOptimize**; **JustResize** to fit 1024, 1920, 2560, or 3840 px, plus more options…; **JustWebP**, **JustAVIF**, **JustJPG**, **JustPNG**; **JustCrop**, **JustRMBG** |
-| PDF | **JustPDF** merge (two or more), split into pages, save embedded images, save links, show details, more options…; **JustLinks** |
+| PDF | **JustPDF** merge (two or more), compress, compress smallest, split into pages, save embedded images, save links, show details, more options…; **JustLinks** |
 | SVG / JSON | **JustSVG**; **JustJSON** format, minify, validate |
 | Office, Markdown, HTML, text, CSV | **JustLinks** to `links.txt` or `links.csv` |
 | Folder, or a folder's empty background | **JustPaste** saves clipboard images, copies files with saved filters, or downloads links into that folder; JustOptimize, JustResize, JustWebP, JustVideo, JustMP3, and JustLinks launchers opened in that folder |
@@ -50,7 +50,7 @@ the menu never does anything the command line cannot.
 
 - Every window closes by itself: after about three seconds when the run
   succeeded, and after thirty when it failed or the result is something to read
-  (PDF details, JSON validation, ZIP preview).
+  (PDF details and compression results, JSON validation, ZIP preview).
 - Enter closes it at once; any other key stops the countdown and keeps the
   window open until Enter.
 - Entries ending in **…** open the tool's [console launcher](console-ui.md)

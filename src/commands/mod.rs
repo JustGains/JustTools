@@ -92,7 +92,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "justpdf",
-        description: "inspect, merge, split, extract, or rotate PDFs, or save their images and links",
+        description: "inspect, merge, split, extract, rotate, or compress PDFs, or save their images and links",
     },
     CommandInfo {
         name: "justpng",

@@ -776,6 +776,12 @@ mod tests {
         let merge = planned("pdf.merge", &["docs/a.pdf", "docs/b.pdf"]);
         assert_eq!(merge.len(), 1);
         assert_eq!(strings(&merge[0]), ["merge", "a.pdf", "b.pdf"]);
+        let compress = planned("pdf.compress.smallest", &["docs/a.pdf", "docs/b.pdf"]);
+        assert_eq!(compress.len(), 1);
+        assert_eq!(
+            strings(&compress[0]),
+            ["compress", "--level", "smallest", "a.pdf", "b.pdf"]
+        );
 
         let action = menu::action("pdf.merge").unwrap();
         let error = plan(&action, Tool::Pdf, &paths(&["docs/a.pdf"])).unwrap_err();

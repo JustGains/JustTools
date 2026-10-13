@@ -265,6 +265,73 @@ fn pdf_images_keep_original_jpegs_and_export_transparency_as_png() {
 }
 
 #[test]
+fn pdf_compress_downsamples_photos_and_keeps_the_source() {
+    let directory = tempdir().unwrap();
+    let pdf = directory.path().join("photo.pdf");
+    create_photo_pdf(&pdf);
+    let original = fs::read(&pdf).unwrap();
+    let compressed = directory.path().join("photo-compressed.pdf");
+
+    Command::cargo_bin("justpdf")
+        .unwrap()
+        .args(["compress", "--dry-run"])
+        .arg(&pdf)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "images ≤150 ppi, JPEG quality 75",
+        ));
+    assert!(!compressed.exists());
+
+    Command::cargo_bin("justpdf")
+        .unwrap()
+        .arg("compress")
+        .arg(&pdf)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 image(s) re-encoded"));
+    assert_eq!(fs::read(&pdf).unwrap(), original);
+    assert!(fs::metadata(&compressed).unwrap().len() < original.len() as u64);
+    // The page is two inches square, so 150 ppi caps the photo at 300 pixels.
+    let image = only_image(&Document::load(&compressed).unwrap());
+    assert_eq!(image.get(b"Width").unwrap().as_i64().unwrap(), 300);
+    assert_eq!(image.get(b"Height").unwrap().as_i64().unwrap(), 150);
+    assert_eq!(
+        image.get(b"Filter").unwrap().as_name().unwrap(),
+        b"DCTDecode"
+    );
+
+    Command::cargo_bin("justpdf")
+        .unwrap()
+        .arg("compress")
+        .arg(&pdf)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--yes"));
+
+    let lossless = directory.path().join("lossless.pdf");
+    Command::cargo_bin("justpdf")
+        .unwrap()
+        .args(["compress", "--level", "lossless", "-o"])
+        .arg(&lossless)
+        .arg(&pdf)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("already compact"));
+    // A copy that would not be smaller is never written.
+    assert!(!lossless.exists());
+
+    Command::cargo_bin("justpdf")
+        .unwrap()
+        .args(["compress", "-o"])
+        .arg(&pdf)
+        .arg(&pdf)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot overwrite its input"));
+}
+
+#[test]
 fn pdf_links_are_unique_in_first_seen_order() {
     let directory = tempdir().unwrap();
     let pdf = directory.path().join("assets.pdf");
@@ -465,6 +532,61 @@ fn create_pdf(path: &Path, sizes: &[(i64, i64)]) {
     let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
     document.trailer.set("Root", catalog_id);
     document.save(path).unwrap();
+}
+
+/// Writes a two-inch-square page drawing one 1200×600 Flate-compressed photo.
+fn create_photo_pdf(path: &Path) {
+    let photo = image::RgbImage::from_fn(1200, 600, |x, y| {
+        let noise = (x.wrapping_mul(7919) ^ y.wrapping_mul(104_729)) % 64;
+        image::Rgb([(x / 5) as u8, (y / 3) as u8, (noise * 4) as u8])
+    });
+    let mut document = Document::with_version("1.5");
+    let pages_id = document.new_object_id();
+    let mut stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 1200,
+            "Height" => 600,
+            "ColorSpace" => "DeviceRGB",
+            "BitsPerComponent" => 8,
+        },
+        photo.into_raw(),
+    );
+    stream.compress().unwrap();
+    let image_id = document.add_object(stream);
+    let content = document.add_object(Stream::new(
+        dictionary! {},
+        b"q 144 0 0 72 0 36 cm /Im1 Do Q".to_vec(),
+    ));
+    let page_id = document.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 144.into(), 144.into()],
+        "Contents" => content,
+        "Resources" => dictionary! { "XObject" => dictionary! { "Im1" => image_id } },
+    });
+    document.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }),
+    );
+    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", catalog_id);
+    document.save(path).unwrap();
+}
+
+fn only_image(document: &Document) -> lopdf::Dictionary {
+    let mut images = document.objects.values().filter_map(|object| {
+        let stream = object.as_stream().ok()?;
+        (stream.dict.get(b"Subtype").ok()?.as_name().ok()? == b"Image").then(|| stream.dict.clone())
+    });
+    let image = images.next().expect("an image");
+    assert!(images.next().is_none());
+    image
 }
 
 /// Writes a two-page PDF with representative images and links, returning the

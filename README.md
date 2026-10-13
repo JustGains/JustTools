@@ -108,8 +108,9 @@ and Alt+V and pastes in other apps pass through.
 `just context install` adds **JustTools** to the File Explorer context menu for
 the current user. Right-click a video for JustVideo at 480p, 720p, 1080p,
 1440p, or 4K and JustMP3/JustAudio/JustWAV; an image for JustOptimize,
-JustResize sizes, WebP/AVIF/JPEG conversion, JustCrop, and JustRMBG; a PDF,
-SVG, JSON file, or document for the tools that read it; and a folder or its
+JustResize sizes, WebP/AVIF/JPEG conversion, JustCrop, and JustRMBG; a PDF for
+JustPDF compression, splitting, images, and links; an SVG, JSON file, or
+document for the tools that read it; and a folder or its
 background for **JustPaste**, which pastes images, copied files, or links using saved copy filters. All files,
 folders, and mixed selections offer **JustZip** with smallest, balanced, and fast
 compression, a file preview, and more options. Git folders honor ignore rules;
@@ -154,7 +155,9 @@ downloading the model. Programs can keep the model loaded with
 for commercial use.
 
 `justpdf images guide.pdf` saves every embedded image, copying JPEGs unchanged
-and keeping transparency as PNG. `justlinks guide.pdf plan.xlsx --csv` writes
+and keeping transparency as PNG. `justpdf compress guide.pdf` writes a smaller
+`guide-compressed.pdf`; `--level smallest` shrinks images further and
+`--level lossless` leaves them untouched. `justlinks guide.pdf plan.xlsx --csv` writes
 every unique link from PDFs, Office, and text files with its title, file, and
 location; add `--recursive` for folders. Matching ignores casing; YouTube watch,
 short, Shorts, live, and embed URLs merge into one clean video link without

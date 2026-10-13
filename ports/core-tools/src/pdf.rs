@@ -9,23 +9,25 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod compress;
 mod images;
 mod links;
 mod text;
 
 use crate::links::{Found, labeled_urls, title_from};
+use compress::Level;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "justpdf",
-    about = "Inspect, merge, split, extract, or rotate PDFs, or save their images and links.",
-    after_help = "PDF inputs are never removed. Page numbers are one-based; ranges look like 1-3,5,last.\nWith no command, one PDF shows info and multiple PDFs are merged to merged.pdf.\nimages keeps original JPEG/JPEG 2000 bytes; transparent or raw images become PNG.\nlinks writes each unique URL once, one per line, in first-seen order.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
+    about = "Inspect, merge, split, extract, rotate, or compress PDFs, or save their images and links.",
+    after_help = "PDF inputs are never removed. Page numbers are one-based; ranges look like 1-3,5,last.\nWith no command, one PDF shows info and multiple PDFs are merged to merged.pdf.\ncompress writes <name>-compressed.pdf only when it is smaller than the original.\nimages keeps original JPEG/JPEG 2000 bytes; transparent or raw images become PNG.\nlinks writes each unique URL once, one per line, in first-seen order.\nThe installed JustTools multicall alias opens a saved-defaults launcher when run bare."
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Merge/extract/rotate/links file, or split/images directory.
+    /// Merge/extract/rotate/links/compress file, or split/images/compress directory.
     #[arg(short = 'o', long, value_name = "PATH", global = true)]
     output: Option<PathBuf>,
 
@@ -36,6 +38,10 @@ struct Cli {
     /// Clockwise rotation: 90, 180, or 270 (default: 90).
     #[arg(short = 'd', long, default_value_t = 90, global = true)]
     degrees: u16,
+
+    /// Compression level for compress.
+    #[arg(short = 'l', long, value_enum, default_value_t = Level::Balanced, global = true)]
+    level: Level,
 
     /// Include nested folders.
     #[arg(short = 'r', long, global = true)]
@@ -91,6 +97,11 @@ enum Command {
         #[arg(value_name = "PDF", required = true)]
         inputs: Vec<PathBuf>,
     },
+    /// Write a smaller copy of each PDF.
+    Compress {
+        #[arg(value_name = "PDF", required = true)]
+        inputs: Vec<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +113,7 @@ enum Operation {
     Info,
     Images,
     Links,
+    Compress,
 }
 
 pub fn run() -> Result<()> {
@@ -123,6 +135,7 @@ fn run_with(options: Cli) -> Result<()> {
         Some(Command::Info { inputs }) => (Some(Operation::Info), inputs.clone()),
         Some(Command::Images { inputs }) => (Some(Operation::Images), inputs.clone()),
         Some(Command::Links { inputs }) => (Some(Operation::Links), inputs.clone()),
+        Some(Command::Compress { inputs }) => (Some(Operation::Compress), inputs.clone()),
         None => (None, options.inputs.clone()),
     };
     if raw_inputs.is_empty() && !stdin_is_terminal() {
@@ -164,6 +177,7 @@ fn run_with(options: Cli) -> Result<()> {
         Operation::Info => info(&files),
         Operation::Images => images::run(&files[0], &options),
         Operation::Links => links::run(&files[0], &options),
+        Operation::Compress => compress::run(&files, &options),
     }
 }
 
@@ -177,6 +191,7 @@ impl Operation {
             Self::Info => "info",
             Self::Images => "images",
             Self::Links => "links",
+            Self::Compress => "compress",
         }
     }
 }

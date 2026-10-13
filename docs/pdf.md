@@ -1,7 +1,7 @@
 # JustPDF
 
-`justpdf` (or `just pdf`) inspects, merges, splits, extracts, and rotates PDFs,
-and saves their embedded images and hyperlinks. PDF inputs are never modified.
+`justpdf` (or `just pdf`) inspects, merges, splits, extracts, rotates, and
+compresses PDFs, and saves their embedded images and hyperlinks. PDF inputs are never modified.
 Run it bare for the console UI: its **Operation** row offers every command
 below, and the footer shows the exact headless command.
 
@@ -14,11 +14,49 @@ below, and the footer shows the exact headless command.
 | `justpdf rotate --degrees 180 guide.pdf` | `guide-rotated.pdf` |
 | `justpdf images guide.pdf` | `guide-images/p001-01.jpg`, `p003-01.png`, … |
 | `justpdf links guide.pdf` | `guide-links.txt` |
+| `justpdf compress guide.pdf` | `guide-compressed.pdf` |
 
 All outputs are written beside the PDF unless `--output` names another path.
 Page ranges are one-based, such as `1-3,5,last`. `--dry-run` previews the plan
 without writing, and existing outputs are replaced only after confirmation or
-`--yes`. Merge accepts several PDFs; every other operation takes exactly one.
+`--yes`. Merge and Compress accept several PDFs; every other operation takes
+exactly one.
+
+## Compress
+
+`compress` writes a smaller copy of each PDF. `--level` picks how hard it works:
+
+| Level | Images | Typical use |
+| --- | --- | --- |
+| `balanced` (default) | At most 150 ppi, JPEG quality 75 | Sharing and reading on screen |
+| `smallest` | At most 96 ppi, JPEG quality 50 | Email attachments and upload limits |
+| `lossless` | Unchanged, byte for byte | Archival copies that must render identically |
+
+Every level drops unused objects and earlier saved revisions, recompresses
+streams at the best Flate setting, and packs objects into compressed object
+streams. Text, vector artwork, fonts, links, bookmarks, and form fields are
+kept.
+
+The lossy levels re-encode 8-bit gray and RGB images, whether stored as JPEG or
+raw pixels, as JPEG. An image is downsampled only when it has more pixels than
+the largest page needs at the level's resolution, so an image drawn smaller
+than the page can keep more than that. A re-encoded image is kept only when it
+saves at least 10%, so flat graphics that compress better losslessly stay as
+they were. Images that are CMYK, indexed, 1-bit, 16-bit, JPEG 2000, CCITT, or
+JBIG2, use color-key masks or `/Decode` arrays, or serve as transparency masks
+are left unchanged. Inline images are not rewritten.
+
+The copy is written only when it is smaller than the source; otherwise the
+command reports that the PDF is already compact and writes nothing. With one
+PDF, `--output` names the file, or an existing folder that receives
+`<name>-compressed.pdf`; with several, it is the folder. A digitally signed PDF
+is compressed with a warning, because any rewrite breaks its signature.
+
+```sh
+justpdf compress guide.pdf --dry-run
+justpdf compress guide.pdf --level smallest
+justpdf compress scans --recursive --level lossless --output compressed
+```
 
 ## Images
 
@@ -70,7 +108,7 @@ justpdf links guide.pdf --output links_output.txt
 
 ## Console UI
 
-The launcher saves the operation, output, page range, rotation, and recursion.
-The page range applies to Extract, Rotate, Images, and Links, and rotation
-applies only to Rotate; saved values an operation does not use are left out of
-its Headless command. The details panel shows the resolved destination.
+The launcher saves the operation, output, page range, rotation, compression
+level, and recursion. The page range applies to Extract, Rotate, Images, and
+Links, rotation only to Rotate, and the compression level only to Compress;
+saved values an operation does not use are left out of its Headless command. The details panel shows the resolved destination.

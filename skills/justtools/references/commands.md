@@ -21,7 +21,7 @@
 | Choose the best web image | `justoptimize` | Measure PNG/WebP/JPEG; preserve alpha; keep source |
 | Create WAV | `justwav` | Stereo 16-bit PCM, 48 kHz; `http(s)` URLs download with yt-dlp |
 | Work with JSON | `justjson` | Format, validate, query, or minify |
-| Work with PDF | `justpdf` | Inspect, merge, split, extract, rotate, save images, or list unique links |
+| Work with PDF | `justpdf` | Inspect, merge, split, extract, rotate, compress, save images, or list unique links |
 | Extract links | `justlinks` | Unique links from PDF, Office, and text files to `links.txt`; `--csv` adds title, file, location, and count |
 | Optimize SVG | `justsvg` | Conservative SVGOMG-style OXVG optimization |
 | Generate QR | `justqr` | 1024 px PNG, error correction Q, four-module margin |
@@ -475,6 +475,8 @@ just json data.json --get user.name
 just pdf report-a.pdf report-b.pdf
 just pdf images guide.pdf --dry-run
 just pdf links guide.pdf --output links.txt
+just pdf compress guide.pdf --dry-run
+just pdf compress guide.pdf --level smallest
 just svg icon.svg
 just qr "https://example.com" --output link.png
 just port 4321 --json
@@ -485,7 +487,12 @@ into the `--output` folder. JPEGs are copied byte-for-byte unless real
 transparency requires an RGBA PNG; raw images become PNG, and unsupported
 encodings are reported as skipped. `justpdf links` writes clickable URLs and
 bookmark URLs, deduplicated in first-seen order, to `<name>-links.txt` or the
-`--output` file or folder. Both accept `--pages` and `--dry-run`. See
+`--output` file or folder. Both accept `--pages` and `--dry-run`.
+`justpdf compress` writes `<name>-compressed.pdf` beside each PDF, or to the
+`--output` file (one PDF) or folder, and writes nothing when the copy would not
+be smaller. `--level balanced` (default) caps images at 150 ppi of the page with
+JPEG quality 75, `smallest` at 96 ppi and quality 50, and `lossless` leaves
+image bytes untouched. Rewriting breaks digital signatures in the copy. See
 `docs/pdf.md`.
 
 ```sh
