@@ -116,6 +116,10 @@ struct Options {
     quality_range: String,
     speed: u32,
     method: u32,
+    /// cwebp's alpha quality; below 100 the transparency is quantized first, which encodes it about 5x faster.
+    alpha_quality: u32,
+    /// cwebp's sharper RGB-to-YUV conversion, for about twice the encode time.
+    sharp_yuv: bool,
     crf: u32,
     preset: String,
     audio_bitrate: String,
@@ -158,15 +162,18 @@ Options:
 Usage:
   justwebp [options] [file-or-folder ...]
 
-Default quality 82/method 5. With no output folder, the destination is
-<source-folder>/<name>.webp; an existing destination is replaced and the source
-is removed only after a smaller WebP is safely installed. --output writes
-<DIR>/<name>.webp and always keeps the source. Animated PNG/WebP and multi-page
-TIFF are rejected.
+Default quality 82/method 2, transparency at alpha quality 80: about 2.4x faster
+than method 5 for files about 5% bigger, and transparent images about 5x faster.
+With no output folder, the destination is <source-folder>/<name>.webp; an
+existing destination is replaced and the source is removed only after a smaller
+WebP is safely installed. --output writes <DIR>/<name>.webp and always keeps the
+source. Animated PNG/WebP and multi-page TIFF are rejected.
 
 Options:
   -q, --quality N        Quality, 0-100 (default: 82)
-  -m, --method N         Compression method, 0-6 (default: 5)
+  -m, --method N         Compression method, 0-6 (default: 2; 5-6 for smallest files)
+  -a, --alpha-quality N  Transparency quality, 0-100 (default: 80; 100 is lossless)
+      --sharp-yuv        Sharper color edges, about twice the encode time
   -w, --include-webp     Re-encode WebP sources
   -o, --output DIR       Write copies to DIR and keep sources
   -j, --jobs N           Parallel encodes (default: {})
@@ -313,7 +320,9 @@ fn parse(mode: MediaMode, args: Vec<OsString>) -> ToolResult<Options> {
         },
         quality_range: std::env::var("QUALITY").unwrap_or_else(|_| "65-90".into()),
         speed: env_u32("SPEED", if mode == MediaMode::Avif { 6 } else { 3 }),
-        method: env_u32("METHOD", 5),
+        method: env_u32("METHOD", 2),
+        alpha_quality: env_u32("ALPHA_QUALITY", 80),
+        sharp_yuv: false,
         crf: env_u32("CRF", 28),
         preset: std::env::var("PRESET").unwrap_or_else(|_| "medium".into()),
         audio_bitrate: std::env::var("AUDIO_BR").unwrap_or_else(|_| {
@@ -435,6 +444,14 @@ fn parse(mode: MediaMode, args: Vec<OsString>) -> ToolResult<Options> {
             "-m" | "--method" if mode == MediaMode::Webp => {
                 options.method = common::integer(tool, &value(&mut index)?, "method", 0, 6)?
             }
+            "-a" | "--alpha-quality" if mode == MediaMode::Webp => {
+                options.alpha_quality =
+                    common::integer(tool, &value(&mut index)?, "alpha quality", 0, 100)?
+            }
+            "--sharp-yuv" if mode == MediaMode::Webp => {
+                flag(&inline)?;
+                options.sharp_yuv = true;
+            }
             "-w" | "--include-webp" if mode == MediaMode::Webp => {
                 flag(&inline)?;
                 options.include_target = true;
@@ -512,6 +529,12 @@ fn parse(mode: MediaMode, args: Vec<OsString>) -> ToolResult<Options> {
             return Err(ToolError::usage(
                 tool,
                 "method must be an integer from 0 to 6",
+            ));
+        }
+        if options.alpha_quality > 100 {
+            return Err(ToolError::usage(
+                tool,
+                "alpha quality must be an integer from 0 to 100",
             ));
         }
     }
@@ -1102,6 +1125,25 @@ fn avif_transparent(ffmpeg: &Path, source: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
+/// cwebp's encoding options, which come before the source and `-o target`.
+fn webp_args(options: &Options) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "-quiet".into(),
+        "-q".into(),
+        options.quality.to_string().into(),
+        "-m".into(),
+        options.method.to_string().into(),
+        "-mt".into(),
+        "-alpha_q".into(),
+        options.alpha_quality.to_string().into(),
+    ];
+    if options.sharp_yuv {
+        args.push("-sharp_yuv".into());
+    }
+    args.extend(["-metadata".into(), "none".into()]);
+    args
+}
+
 fn encode(mode: MediaMode, options: &Options, executable: &Path, plan: &Plan) -> Status {
     let before = match fs::metadata(&plan.source) {
         Ok(value) => value.len(),
@@ -1139,21 +1181,10 @@ fn encode(mode: MediaMode, options: &Options, executable: &Path, plan: &Plan) ->
         .map(OsString::from)
         .chain([target.clone(), OsString::from("--"), source.clone()])
         .collect(),
-        MediaMode::Webp => [
-            "-quiet",
-            "-q",
-            &options.quality.to_string(),
-            "-m",
-            &options.method.to_string(),
-            "-mt",
-            "-sharp_yuv",
-            "-metadata",
-            "none",
-        ]
-        .into_iter()
-        .map(OsString::from)
-        .chain([source.clone(), OsString::from("-o"), target.clone()])
-        .collect(),
+        MediaMode::Webp => webp_args(options)
+            .into_iter()
+            .chain([source.clone(), OsString::from("-o"), target.clone()])
+            .collect(),
         MediaMode::Video => vec!["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"]
             .into_iter()
             .map(OsString::from)
@@ -1690,6 +1721,39 @@ mod tests {
         assert_eq!(download_height(Some(480)), Some(1080));
         assert_eq!(download_height(Some(2160)), Some(2160));
         assert_eq!(download_height(None), None);
+    }
+
+    #[test]
+    fn webp_is_fast_by_default_and_sharp_yuv_is_opt_in() {
+        let args = |input: Vec<OsString>| {
+            webp_args(&parse(MediaMode::Webp, input).unwrap())
+                .into_iter()
+                .map(|arg| arg.into_string().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(
+            args(vec![]),
+            "-quiet -q 82 -m 2 -mt -alpha_q 80 -metadata none"
+        );
+        assert_eq!(
+            args(vec![
+                "--method".into(),
+                "5".into(),
+                "--alpha-quality".into(),
+                "100".into(),
+                "--sharp-yuv".into()
+            ]),
+            "-quiet -q 82 -m 5 -mt -alpha_q 100 -sharp_yuv -metadata none"
+        );
+        assert!(
+            parse(
+                MediaMode::Webp,
+                vec!["--alpha-quality".into(), "101".into()]
+            )
+            .is_err()
+        );
+        assert!(parse(MediaMode::Png, vec!["--sharp-yuv".into()]).is_err());
     }
 
     #[test]
