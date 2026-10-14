@@ -67,6 +67,12 @@ selected listening port. System processes, changed identities, stale port
 owners, and services owned by another user are refused. Other listeners and
 saved Launch Again entries are untouched.
 
+For a tray app or script, `justports --stop PORT PID START_TIME` takes the three
+values from a recent `--json` result. It scans again and refuses to stop the
+listener if its port, PID, or start time changed. The same ownership and
+listener checks used by `K` run immediately before termination. This command
+stops a process, so only call it after the user chooses a stop action.
+
 The JSON history file is written atomically in the per-user JustTools data
 directory. Run `justports --history-path` to print its exact location. Command
 arguments whose names suggest tokens, API keys, passwords, secrets, or
@@ -82,6 +88,7 @@ justports --snapshot --all
 justports --json
 justports --json --all
 justports --open 5173
+justports --stop 5173 12345 1700000000
 ```
 
 `--snapshot`, `--json`, and `--open` are mutually exclusive. `--all` can be

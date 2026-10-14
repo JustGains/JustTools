@@ -65,6 +65,10 @@ and one-run actions never persist. The bottom line always shows the exact
 Use `<command> --help` for every option. Direct aliases also work as short
 dispatch, such as `just optimize`, `just ports`, and `just rmbg`.
 
+`justports --json` lists local development servers for tray integrations.
+`justports --stop PORT PID START_TIME` safely stops the exact listener from a
+recent JSON result after checking its identity and ownership again.
+
 Windows installations include PowerShell launchers: use `mkcd`, `claude_`, and
 `codex_` directly, with no `init` command or profile edit. On macOS/Linux, enable
 helpers in Bash/Zsh with

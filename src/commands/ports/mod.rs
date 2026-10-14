@@ -19,7 +19,15 @@ struct Options {
     snapshot: bool,
     json: bool,
     open: Option<u16>,
+    stop: Option<StopRequest>,
     history_path: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StopRequest {
+    port: u16,
+    pid: u32,
+    start_time: u64,
 }
 
 pub fn run(args: Vec<OsString>) -> ToolResult {
@@ -73,6 +81,40 @@ fn parse(args: &[String]) -> ToolResult<Options> {
                 }
                 options.open = Some(port);
             }
+            "--stop" => {
+                if options.stop.is_some() {
+                    return Err(ToolError::usage(TOOL, "--stop may only be given once"));
+                }
+                let values = args.get(index + 1..index + 4).ok_or_else(|| {
+                    ToolError::usage(
+                        TOOL,
+                        "--stop needs PORT PID START_TIME from a current JSON snapshot",
+                    )
+                })?;
+                let port = values[0]
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| ToolError::usage(TOOL, "--stop port must be from 1 to 65535"))?;
+                let pid = values[1]
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|pid| *pid > 4)
+                    .ok_or_else(|| ToolError::usage(TOOL, "--stop PID must be greater than 4"))?;
+                let start_time = values[2]
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|time| *time > 0)
+                    .ok_or_else(|| {
+                        ToolError::usage(TOOL, "--stop START_TIME must be a Unix timestamp")
+                    })?;
+                options.stop = Some(StopRequest {
+                    port,
+                    pid,
+                    start_time,
+                });
+                index += 3;
+            }
             "--history-path" => options.history_path = true,
             argument => {
                 return Err(ToolError::usage(
@@ -89,14 +131,24 @@ fn parse(args: &[String]) -> ToolResult<Options> {
             "--snapshot cannot be combined with --json",
         ));
     }
-    if options.open.is_some() && (options.snapshot || options.json) {
+    if options.open.is_some() && (options.snapshot || options.json || options.stop.is_some()) {
         return Err(ToolError::usage(
             TOOL,
-            "--open cannot be combined with --snapshot or --json",
+            "--open cannot be combined with --snapshot, --json or --stop",
+        ));
+    }
+    if options.stop.is_some() && (options.snapshot || options.json || options.all) {
+        return Err(ToolError::usage(
+            TOOL,
+            "--stop cannot be combined with inventory options",
         ));
     }
     if options.history_path
-        && (options.open.is_some() || options.snapshot || options.json || options.all)
+        && (options.open.is_some()
+            || options.stop.is_some()
+            || options.snapshot
+            || options.json
+            || options.all)
     {
         return Err(ToolError::usage(
             TOOL,
@@ -109,6 +161,24 @@ fn parse(args: &[String]) -> ToolResult<Options> {
 fn run_with(options: Options, preferences: Option<crate::preferences::Store>) -> Result<()> {
     if options.history_path {
         println!("{}", cache::cache_path()?.display());
+        return Ok(());
+    }
+    if let Some(request) = options.stop {
+        let mut scanner = ServerScanner::new();
+        let servers = scanner.scan()?;
+        let server = servers
+            .iter()
+            .find(|server| {
+                server.port == request.port
+                    && server.pid == request.pid
+                    && server.start_time == request.start_time
+            })
+            .context("listener identity changed; refresh and retry")?;
+        scan::terminate_server(server)?;
+        println!(
+            "justports: stopped {} on port {} (PID {})",
+            server.project_name, server.port, server.pid
+        );
         return Ok(());
     }
     if let Some(port) = options.open {
@@ -211,6 +281,8 @@ Usage:
   justports --snapshot --all   Print every TCP listener once
   justports --json [--all]     Emit machine-readable server details
   justports --open PORT        Open a listener directly in the default browser
+  justports --stop PORT PID START_TIME
+                               Stop the exact listener from a JSON snapshot
   justports --history-path     Print the persistent history file location
   justports -h, --help         Show this help
   justports -V, --version      Show the version
@@ -236,11 +308,61 @@ mod tests {
         assert!(options.all);
         let options = parse(&["--open".into(), "5173".into()]).unwrap();
         assert_eq!(options.open, Some(5173));
+        let options = parse(&[
+            "--stop".into(),
+            "5173".into(),
+            "123".into(),
+            "1700000000".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            options.stop,
+            Some(StopRequest {
+                port: 5173,
+                pid: 123,
+                start_time: 1700000000
+            })
+        );
     }
 
     #[test]
     fn incompatible_modes_are_rejected() {
         assert!(parse(&["--json".into(), "--snapshot".into()]).is_err());
         assert!(parse(&["--open".into(), "3000".into(), "--json".into()]).is_err());
+        assert!(
+            parse(&[
+                "--stop".into(),
+                "5173".into(),
+                "123".into(),
+                "1700000000".into(),
+                "--json".into()
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--stop".into(),
+                "5173".into(),
+                "123".into(),
+                "1700000000".into(),
+                "--open".into(),
+                "5173".into()
+            ])
+            .is_err()
+        );
+        assert!(parse(&["--stop".into(), "5173".into(), "123".into(), "0".into()]).is_err());
+        assert!(
+            parse(&[
+                "--stop".into(),
+                "5173".into(),
+                "123".into(),
+                "1700000000".into(),
+                "--stop".into(),
+                "5174".into(),
+                "124".into(),
+                "1700000001".into()
+            ])
+            .is_err()
+        );
     }
 }

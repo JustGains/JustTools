@@ -119,6 +119,7 @@ justports --all
 justports --snapshot
 justports --json --all
 justports --open 5173
+justports --stop PORT PID START_TIME
 justports --history-path
 just ports
 ```
@@ -129,7 +130,8 @@ stops, Launch Again offers the explicitly selected safe package/common/prior
 recipe from its original directory. Commands containing likely credentials or
 opaque tokens are not cached. Use `justport` instead when exact-port ownership
 from scripts is the goal; `K` provides confirmation-gated termination for the
-selected Running Now service.
+selected Running Now service. Headless `--stop` requires a port, PID, and start
+time from a recent JSON result and rechecks the same process safeguards.
 
 ## Public IP examples
 

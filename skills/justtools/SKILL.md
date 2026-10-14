@@ -166,6 +166,9 @@ installer and may surface UAC or `sudo` prompts.
   or stops a selection. Review remembered start recipes before launching them.
   `K` must remain confirmation-gated and revalidate PID, start time, same-user
   ownership, and exact listener ownership before stopping the selected service.
+  Headless `--stop PORT PID START_TIME` is for an explicit user stop action in
+  an integration; obtain all three values from a recent `--json` result. It
+  revalidates the same process identity and listener ownership before stopping.
 - In `bunt`, protect workloads that must survive with `e` before using `K`.
   Bunt revalidates PID, start time, runtime, workload, and exclusions before
   terminating the captured target set.
