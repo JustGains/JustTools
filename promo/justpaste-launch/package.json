@@ -1,0 +1,19 @@
+{
+  "name": "justpaste-launch",
+  "private": true,
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render JustPasteLaunch out/justpaste-launch.mp4",
+    "still": "remotion still JustPasteLaunch out/still.png"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.534",
+    "@remotion/google-fonts": "^4.0.534",
+    "@remotion/transitions": "^4.0.534",
+    "@types/react": "^19.3.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "remotion": "^4.0.534",
+    "typescript": "^5.9.3"
+  }
+}
