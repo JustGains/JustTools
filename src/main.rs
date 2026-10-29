@@ -1,5 +1,6 @@
 mod commands;
 mod common;
+mod console_status;
 mod console_ui;
 mod context;
 mod deps;

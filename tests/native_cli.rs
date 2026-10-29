@@ -188,7 +188,7 @@ fn install_creates_native_aliases_and_backs_up_legacy_scripts() {
     let result = Command::new(binary())
         .args(["install", "--bin-dir"])
         .arg(&bin)
-        .args(["--yes", "--no-path"])
+        .args(["--yes", "--no-path", "--no-context-menu"])
         .output()
         .unwrap();
     assert!(
@@ -483,6 +483,34 @@ fn justcommit_stages_by_default_uses_rules_and_pushes_the_created_commit() {
         "Commit message:\nfeat(core): add greeting helper\n\nExpose a small reusable greeting for callers."
     ));
     assert!(stdout.contains("justcommit: pushed"));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let phases = [
+        "resolving the Git repository",
+        "staging the complete working tree",
+        "scanning staged changes",
+        "recording the staged index",
+        "reading commit instructions",
+        "sampling bounded text patches",
+        "building the bounded digest",
+        "waiting for OpenRouter (test/fast-model)",
+        "checking that the staged index is unchanged",
+        "creating the commit (including Git hooks)",
+        "pushing ",
+    ];
+    let mut remaining = stderr.as_ref();
+    for phase in phases {
+        let marker = format!("justcommit: {phase}");
+        remaining = remaining
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing or out-of-order progress phase {phase}: {stderr}"))
+            .1;
+    }
+    assert!(stderr.contains("2 staged file(s)"), "{stderr}");
+    assert!(stderr.contains("digest ready;"), "{stderr}");
+    assert!(stderr.contains("request timeout 45s"), "{stderr}");
+    assert!(!stderr.contains("integration-test-key"));
+    assert!(!stderr.contains("still working"));
+    assert!(!stderr.contains('\u{1b}'));
 
     let request = server.join().unwrap();
     assert!(
@@ -518,6 +546,59 @@ fn justcommit_stages_by_default_uses_rules_and_pushes_the_created_commit() {
     assert!(remote_log.status.success());
     let remote_log = String::from_utf8_lossy(&remote_log.stdout).replace("\r\n", "\n");
     assert_eq!(remote_log.trim(), log.trim());
+}
+
+#[test]
+fn justcommit_reports_ai_failure_without_committing_or_changing_staged_scope() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = directory.path();
+    assert!(git(repository, &["init", "--quiet"]).status.success());
+    fs::write(repository.join("selected.txt"), "selected\n").unwrap();
+    assert!(git(repository, &["add", "selected.txt"]).status.success());
+    fs::write(repository.join("unselected.txt"), "unselected\n").unwrap();
+    let tree_before = git(repository, &["write-tree"]).stdout;
+    let (url, server) = fake_openrouter("invalid generated message");
+    let result = Command::new(binary())
+        .args(["commit", "--directory"])
+        .arg(repository)
+        .args([
+            "--staged",
+            "--no-patches",
+            "--dry-run",
+            "--model",
+            "test/failing-model",
+            "--api-key",
+            "integration-test-key",
+        ])
+        .env("JUSTCOMMIT_OPENROUTER_URL", url)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("using the existing staged selection"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("patch sampling disabled (--no-patches)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("0 patch sample(s)"), "{stderr}");
+    assert!(
+        stderr.contains("waiting for OpenRouter (test/failing-model) failed"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("waiting for OpenRouter (test/failing-model) done"));
+    assert!(!stderr.contains("creating the commit"));
+    assert!(!stderr.contains("integration-test-key"));
+    assert!(result.stdout.is_empty());
+    assert_eq!(git(repository, &["write-tree"]).stdout, tree_before);
+    assert!(
+        !git(repository, &["rev-parse", "--verify", "HEAD"])
+            .status
+            .success()
+    );
+    server.join().unwrap();
 }
 
 #[test]
@@ -783,6 +864,8 @@ fn missing_dependency_never_installs_without_a_terminal() {
         .arg("video")
         .arg(&input)
         .env("PATH", &fake_bin)
+        // The user's managed FFmpeg cache must not satisfy this fixture.
+        .env("JUSTTOOLS_DEPS_DIR", directory.path().join("empty-deps"))
         // Without this the missing FFmpeg would simply be downloaded.
         .env("JUSTTOOLS_NO_DOWNLOAD", "1")
         .env_remove("FFMPEG_BIN")

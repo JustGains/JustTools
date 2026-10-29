@@ -34,6 +34,9 @@ jobs:
       - name: Check the complete workspace at MSRV
         run: cargo +1.90.0 check --locked --workspace --all-targets
 
+      - name: Check Windows release publication guards
+        run: python3 scripts/windows/test_verify_release.py
+
   build:
     name: ${{ matrix.name }}
     timeout-minutes: 60
@@ -197,9 +200,21 @@ jobs:
           Copy-Item "target/release/${{ matrix.executable }}", README.md, AGENTS.md, LICENSE, THIRD_PARTY_LICENSES.md -Destination $stage
           Copy-Item "target/release/justtools_shell.dll" -Destination $stage
           Copy-Item docs, skills -Destination $stage -Recurse
+          $taggedRelease = $env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME.StartsWith("v")
+          if ($taggedRelease -and !$env:JUSTTOOLS_SIGNING_PFX) {
+            throw "Windows releases require JUSTTOOLS_SIGNING_PFX and JUSTTOOLS_SIGNING_PASSWORD for trusted code signing. Unsigned branch builds are available as CI artifacts."
+          }
+          $expectedVersion = (& "target/release/${{ matrix.executable }}" --version) -replace '^just ', ''
+          if ($LASTEXITCODE -ne 0) { throw "Cannot read the executable version." }
+          foreach ($payload in @("$stage/just.exe", "$stage/justtools_shell.dll")) {
+            $details = [Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path -LiteralPath $payload).Path)
+            if ($details.ProductName -ne "JustTools" -or $details.CompanyName -ne "JustGains" -or $details.ProductVersion -ne $expectedVersion) {
+              throw "Missing or inconsistent Windows product metadata in $payload."
+            }
+          }
           if ($env:JUSTTOOLS_SIGNING_PFX) {
-            # A signed package identity is what admits the menu to the
-            # top-level Windows 11 context menu without Developer Mode.
+            # Sign the executable and DLL themselves, as well as the sparse
+            # identity package. Signing only MSIX leaves tool binaries unsigned.
             $kit = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/10.*/x64" -Directory |
               Where-Object { Test-Path (Join-Path $_.FullName "makeappx.exe") } |
               Sort-Object Name -Descending | Select-Object -First 1
@@ -207,16 +222,28 @@ jobs:
             $certificate = Join-Path $env:RUNNER_TEMP "justtools-signing.pfx"
             [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:JUSTTOOLS_SIGNING_PFX))
             try {
-              $subject = (New-Object Security.Cryptography.X509Certificates.X509Certificate2(
-                $certificate, $env:JUSTTOOLS_SIGNING_PASSWORD)).Subject
+              $signingCertificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2(
+                $certificate, $env:JUSTTOOLS_SIGNING_PASSWORD)
+              if (!$signingCertificate.HasPrivateKey) { throw "The signing certificate has no private key." }
+              $subject = $signingCertificate.Subject
+              $signingCertificate.Dispose()
+              $signtool = Join-Path $kit.FullName "signtool.exe"
+              foreach ($payload in @("$stage/just.exe", "$stage/justtools_shell.dll")) {
+                & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /d JustTools /f $certificate /p $env:JUSTTOOLS_SIGNING_PASSWORD $payload
+                if ($LASTEXITCODE -ne 0) { throw "Code signing failed for $payload (exit $LASTEXITCODE)." }
+                & $signtool verify /pa /all /tw $payload
+                if ($LASTEXITCODE -ne 0) { throw "Signature verification failed for $payload." }
+              }
               $layout = Join-Path $env:RUNNER_TEMP "justtools-package"
               & "target/release/${{ matrix.executable }}" context package --output $layout --publisher $subject
               if ($LASTEXITCODE -ne 0) { throw "The package layout could not be written." }
               $package = Join-Path $stage "justtools-shell.msix"
               & (Join-Path $kit.FullName "makeappx.exe") pack /o /nv /d $layout /p $package
               if ($LASTEXITCODE -ne 0) { throw "makeappx failed with exit code $LASTEXITCODE" }
-              & (Join-Path $kit.FullName "signtool.exe") sign /fd SHA256 /f $certificate /p $env:JUSTTOOLS_SIGNING_PASSWORD $package
+              & $signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $certificate /p $env:JUSTTOOLS_SIGNING_PASSWORD $package
               if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+              & $signtool verify /pa /all /tw $package
+              if ($LASTEXITCODE -ne 0) { throw "MSIX signature verification failed." }
             } finally {
               Remove-Item -LiteralPath $certificate -Force
             }
@@ -225,6 +252,24 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $checksum = "$hash  $([IO.Path]::GetFileName($archive))`n"
           [IO.File]::WriteAllText("$archive.sha256", $checksum, [Text.Encoding]::ASCII)
+
+      - name: Scan the Windows release with current Defender signatures
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $stage = "dist/${{ matrix.artifact }}"
+          $archive = "dist/${{ matrix.artifact }}.zip"
+          $payloads = @(Get-ChildItem -LiteralPath $stage -File | Where-Object { $_.Extension -in @('.exe', '.dll', '.msix') } | ForEach-Object FullName)
+          $payloads += (Resolve-Path -LiteralPath $archive).Path
+          ./scripts/windows/scan-release.ps1 -Path $payloads -ReportPath "$archive.defender.json" -UpdateSignatures
+
+      - name: Preserve a failed Windows scan report
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: defender-diagnostics-${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.zip.defender.json
+          if-no-files-found: ignore
 
       - name: Package Unix artifact with executable mode
         if: matrix.archive == 'tar.gz'
@@ -279,6 +324,7 @@ jobs:
           path: |
             dist/${{ matrix.artifact }}.${{ matrix.archive }}
             dist/${{ matrix.artifact }}.${{ matrix.archive }}.sha256
+            dist/${{ matrix.artifact }}.${{ matrix.archive }}.defender.json
           if-no-files-found: error
 
   directml-smoke:
@@ -471,6 +517,7 @@ jobs:
             fi
             (cd dist && sha256sum -c "$archive.sha256")
           done
+          python3 scripts/windows/verify-release.py dist/justtools-windows-x64.zip dist/justtools-windows-arm64.zip
 
       - name: Publish release assets
         shell: bash

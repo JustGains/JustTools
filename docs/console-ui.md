@@ -53,7 +53,7 @@ sources unless **Replace sources** is explicitly enabled.
 | `justwebp` | `<source-folder>/<name>.webp` | `<folder>/<name>.webp` | Blank output removes source only after a smaller WebP is safe; folder output keeps it |
 | `justavif` | `<source-folder>/<name>.avif` | `<folder>/<name>.avif` | Blank output removes source only after a smaller AVIF is safe; folder output keeps it |
 | `justjpg` | `<name>-optimized.jpg` | `<folder>/<name>.jpg` | Keeps source unless **Replace sources** is on |
-| `justoptimize` | `<name>-optimized.<best>` | `<folder>/<name>.<best>` | Keeps source unless **Replace sources** is on; already-smallest web inputs are left alone |
+| `justoptimize` | `<name>-optimized.<best>` | `<folder>/<name>.<best>` | Keeps source unless **Replace sources** is on; already-smallest web inputs are left alone; SVG stays SVG |
 | `justresize` | `<name>-resized.<same>` | `<folder>/<name>.<same>` | Keeps source unless **Replace sources** is on |
 | `justcrop` | `<name>-cropped.<same>` | `<folder>/<name>.<same>` | Keeps source unless **Replace sources** is on |
 | `justrmbg` | `<name>-nobg.png` beside input | Exact file for one input; directory for a batch | Always keeps input; existing output is replaced atomically |
@@ -101,7 +101,7 @@ The following settings are remembered when changed:
 | `justpdf` | Operation, output, page range, rotation, recursion |
 | `justlinks` | Text or CSV format, output, recursion, parallel jobs |
 | `justip` | Address family, output format, and lookup timeout |
-| `justpaste` | Output folder and playlist downloads; links are never saved |
+| `justpaste` | Output folder, playlist downloads, and AI service, model, and endpoint; links, Paste as, and the AI instruction are never saved |
 | `justport` | Whether UDP endpoints are included |
 | `justqr` | Output, format, size, correction level, margin, colors |
 | `justrmbg` | Provider, output, and optional model path; pinned-dependency download permission is visible but one-run |

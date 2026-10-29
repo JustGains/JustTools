@@ -1,6 +1,6 @@
 [package]
 name = "justtools-shell"
-version = "2.8.0"
+version = "2.9.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -10,9 +10,7 @@ build = "build.rs"
 [lib]
 name = "justtools_shell"
 crate-type = ["cdylib"]
-# The library is empty off Windows and has no tests of its own; the menu it
-# shows is tested in justtools-menu.
-test = false
+# The model is tested on every platform; COM host sequences are tested on Windows.
 doctest = false
 
 [target.'cfg(windows)'.dependencies]

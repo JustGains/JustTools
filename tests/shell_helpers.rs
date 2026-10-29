@@ -142,7 +142,7 @@ fn mkcd_windows_install_works_without_init_and_preserves_pipelines() {
     let installed = Command::new(binary())
         .args(["install", "--bin-dir"])
         .arg(&bin)
-        .args(["--yes", "--no-path"])
+        .args(["--yes", "--no-path", "--no-context-menu"])
         .output()
         .unwrap();
     assert_success(&installed);
@@ -150,7 +150,7 @@ fn mkcd_windows_install_works_without_init_and_preserves_pipelines() {
     let reinstall = Command::new(binary())
         .args(["install", "--bin-dir"])
         .arg(&bin)
-        .args(["--yes", "--no-path"])
+        .args(["--yes", "--no-path", "--no-context-menu"])
         .output()
         .unwrap();
     assert_success(&reinstall);

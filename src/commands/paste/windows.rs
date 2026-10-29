@@ -1,5 +1,9 @@
 //! Per-user Explorer integration, running in the existing executable, never in Explorer.
-use super::{Settings, clipboard::Snapshot};
+use super::{
+    Settings,
+    actions::{self, Action, OnPaste},
+    clipboard::Snapshot,
+};
 use std::{
     ffi::OsString,
     path::PathBuf,
@@ -22,6 +26,8 @@ use windows::{
     core::{Interface, PCWSTR, w},
 };
 
+mod ai_window;
+mod picker;
 mod progress_window;
 mod settings;
 
@@ -47,7 +53,9 @@ fn open_settings() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let mut child = executable_command()?
         .arg("--settings")
-        .creation_flags(CREATE_NO_WINDOW.0 | CREATE_BREAKAWAY_FROM_JOB.0)
+        // Settings may share the resident's job. Requesting breakaway here
+        // fails with access denied when that job forbids child detachment.
+        .creation_flags(CREATE_NO_WINDOW.0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -74,7 +82,10 @@ const INSPECT_SHELL: u32 = WM_APP + 5;
 const INJECTED: usize = 0x4a505354;
 static PAUSED: AtomicBool = AtomicBool::new(false);
 static BUSY: AtomicBool = AtomicBool::new(false);
+/// Whether copied files may need JustPaste: copy filters or a media default.
 static FILTERS: AtomicBool = AtomicBool::new(false);
+/// The picker chord: 0 off, 1 Ctrl+Shift+V, 2 Win+Shift+V, 3 Ctrl+Alt+V.
+static PICKER_KEY: AtomicU32 = AtomicU32::new(1);
 static SWALLOWED_IN: AtomicUsize = AtomicUsize::new(0);
 static EXITING: AtomicBool = AtomicBool::new(false);
 static MAINTAINING: AtomicBool = AtomicBool::new(false);
@@ -89,6 +100,47 @@ struct Request {
     window: usize,
     focus: usize,
     sequence: u32,
+    /// Pressed with the picker shortcut rather than Ctrl+V.
+    picker: bool,
+}
+
+fn picker_code(key: &str) -> u32 {
+    match key {
+        "ctrl+shift+v" => 1,
+        "win+shift+v" => 2,
+        "ctrl+alt+v" => 3,
+        _ => 0,
+    }
+}
+
+pub(super) fn picker_label() -> &'static str {
+    match PICKER_KEY.load(Ordering::SeqCst) {
+        1 => "Ctrl+Shift+V",
+        2 => "Win+Shift+V",
+        3 => "Ctrl+Alt+V",
+        _ => "off",
+    }
+}
+
+/// Refresh what the keyboard hook reads from the saved settings.
+fn publish(settings: &Settings) {
+    FILTERS.store(
+        settings.filters() || settings.paste.media != OnPaste::Act(Action::Native),
+        Ordering::SeqCst,
+    );
+    PICKER_KEY.store(picker_code(settings.picker.key), Ordering::SeqCst);
+}
+
+/// Which handled chord, if any, the modifiers make with V: 1 is Ctrl+V,
+/// 2 the configured picker shortcut.
+fn chord(ctrl: bool, shift: bool, alt: bool, win: bool, picker: u32) -> u32 {
+    match (ctrl, shift, alt, win) {
+        (true, false, false, false) => 1,
+        (true, true, false, false) if picker == 1 => 2,
+        (false, true, false, true) if picker == 2 => 2,
+        (true, false, true, false) if picker == 3 => 2,
+        _ => 0,
+    }
 }
 
 /// Key repeats belong only to the exact Explorer file control that took the
@@ -109,12 +161,60 @@ fn suppress_followup(
     }
 }
 
+const CF_DIB: u32 = 8;
+const CF_UNICODETEXT: u32 = 13;
+const CF_HDROP: u32 = 15;
+const CF_DIBV5: u32 = 17;
+
+/// `PNG`, `image/png`, `FileGroupDescriptorW`, `FileGroupDescriptor`, registered
+/// before the hook starts so the hook itself only reads them.
+static FORMATS: OnceLock<[u32; 4]> = OnceLock::new();
+fn registered_formats() -> [u32; 4] {
+    *FORMATS.get_or_init(|| {
+        [
+            "PNG",
+            "image/png",
+            "FileGroupDescriptorW",
+            "FileGroupDescriptor",
+        ]
+        .map(|name| unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(
+                &windows::core::HSTRING::from(name),
+            )
+        })
+    })
+}
+
+/// Whether the clipboard holds something Smart Paste can act on, checked by
+/// format availability alone (no clipboard open) so it is cheap enough for the
+/// keyboard hook: images and text (links), and copied files only with copy
+/// filters on. Virtual files and everything else keep Explorer's own paste.
+fn wants_clipboard(
+    filters: bool,
+    [png, image_png, descriptor_w, descriptor]: [u32; 4],
+    available: impl Fn(u32) -> bool,
+) -> bool {
+    if available(CF_HDROP) {
+        return filters;
+    }
+    if [descriptor_w, descriptor]
+        .into_iter()
+        .any(|format| format != 0 && available(format))
+    {
+        return false;
+    }
+    [png, image_png, CF_DIBV5, CF_DIB, CF_UNICODETEXT]
+        .into_iter()
+        .any(|format| format != 0 && available(format))
+}
+
 /// The hook must keep pumping even while a tray menu is open or settings I/O
 /// stalls. Windows silently removes low-level hooks that take too long.
 struct KeyboardListener(u32);
 impl KeyboardListener {
     fn new() -> Result<Self, String> {
         let (ready, initialized) = sync_channel(1);
+        registered_formats();
         std::thread::spawn(move || unsafe {
             let mut message = MSG::default();
             let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
@@ -161,6 +261,7 @@ fn state_label(state: u32) -> &'static str {
         9 => "native paste: clipboard content is not enabled for Smart Paste",
         10 => "busy with the previous paste",
         11 => "paste skipped: release the shortcut keys and try again",
+        12 => "picker closed without a choice",
         _ => "waiting for Ctrl+V in Explorer",
     }
 }
@@ -359,9 +460,15 @@ unsafe extern "system" fn keyboard(code: i32, message: WPARAM, data: LPARAM) -> 
         return unsafe { CallNextHookEx(None, code, message, data) };
     }
     let pressed = |key: VIRTUAL_KEY| unsafe { GetAsyncKeyState(i32::from(key.0)) < 0 };
-    let other_modifier =
-        pressed(VK_SHIFT) || pressed(VK_MENU) || pressed(VK_LWIN) || pressed(VK_RWIN);
-    let plain_ctrl_v = pressed(VK_CONTROL) && !other_modifier;
+    let win = pressed(VK_LWIN) || pressed(VK_RWIN);
+    let alt = pressed(VK_MENU);
+    let chord = chord(
+        pressed(VK_CONTROL),
+        pressed(VK_SHIFT),
+        alt,
+        win,
+        PICKER_KEY.load(Ordering::SeqCst),
+    );
     let window = unsafe { GetForegroundWindow() };
     let explorer = class_name(window) == "CabinetWClass";
     let focused = explorer.then(|| focus(window)).flatten().filter(|handle| {
@@ -371,20 +478,19 @@ unsafe extern "system" fn keyboard(code: i32, message: WPARAM, data: LPARAM) -> 
         )
     });
     let scope = focused
-        .filter(|_| !other_modifier && !PAUSED.load(Ordering::SeqCst))
+        .filter(|_| chord != 0 && !PAUSED.load(Ordering::SeqCst))
         .map_or(0, |handle| handle.0 as usize);
     let (owner, swallow) = suppress_followup(
         SWALLOWED_IN.load(Ordering::SeqCst),
         scope,
         message.0 as u32,
-        plain_ctrl_v,
+        chord != 0,
     );
     SWALLOWED_IN.store(owner, Ordering::SeqCst);
     if swallow {
         return LRESULT(1);
     }
-    if message.0 as u32 != WM_KEYDOWN || !plain_ctrl_v || PAUSED.load(Ordering::SeqCst) || !explorer
-    {
+    if message.0 as u32 != WM_KEYDOWN || chord == 0 || PAUSED.load(Ordering::SeqCst) || !explorer {
         return unsafe { CallNextHookEx(None, code, message, data) };
     }
     LAST_STATE.store(1, Ordering::SeqCst);
@@ -392,11 +498,19 @@ unsafe extern "system" fn keyboard(code: i32, message: WPARAM, data: LPARAM) -> 
         LAST_STATE.store(2, Ordering::SeqCst);
         return unsafe { CallNextHookEx(None, code, message, data) };
     };
-    // Native file transfers require no interception when copy filters are disabled.
-    if !FILTERS.load(Ordering::SeqCst)
-        && unsafe { windows::Win32::System::DataExchange::IsClipboardFormatAvailable(15) }.is_ok()
+    // Anything Smart Paste would hand back stays Explorer's paste, untouched and without delay.
+    let available = |format| unsafe {
+        windows::Win32::System::DataExchange::IsClipboardFormatAvailable(format).is_ok()
+    };
+    let picker = chord == 2;
+    if !picker
+        && !wants_clipboard(
+            FILTERS.load(Ordering::SeqCst),
+            registered_formats(),
+            available,
+        )
     {
-        LAST_STATE.store(3, Ordering::SeqCst);
+        LAST_STATE.store(if available(CF_HDROP) { 3 } else { 9 }, Ordering::SeqCst);
         return unsafe { CallNextHookEx(None, code, message, data) };
     }
     if BUSY.swap(true, Ordering::SeqCst) {
@@ -412,6 +526,7 @@ unsafe extern "system" fn keyboard(code: i32, message: WPARAM, data: LPARAM) -> 
         window: window.0 as usize,
         focus: focused.0 as usize,
         sequence: unsafe { GetClipboardSequenceNumber() },
+        picker,
     };
     crate::common::set_interrupted(false);
     if REQUESTS
@@ -419,10 +534,39 @@ unsafe extern "system" fn keyboard(code: i32, message: WPARAM, data: LPARAM) -> 
         .is_some_and(|sender| sender.try_send(request).is_ok())
     {
         SWALLOWED_IN.store(scope, Ordering::SeqCst);
+        if win || alt {
+            // A Windows or Alt key released with nothing between would open
+            // Start or Explorer's menu bar; an unassigned key keeps them closed.
+            mask_modifier_release();
+        }
         LRESULT(1)
     } else {
         BUSY.store(false, Ordering::SeqCst);
         unsafe { CallNextHookEx(None, code, message, data) }
+    }
+}
+
+fn mask_modifier_release() {
+    let key = |up| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0xE8),
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                dwExtraInfo: INJECTED,
+                ..Default::default()
+            },
+        },
+    };
+    unsafe {
+        SendInput(
+            &[key(false), key(true)],
+            std::mem::size_of::<INPUT>() as i32,
+        );
     }
 }
 
@@ -608,15 +752,55 @@ fn handle(request: &Request, resolver: &ShellResolver) -> Result<(), String> {
     if unsafe { GetClipboardSequenceNumber() } != request.sequence || !same_target(request) {
         return Err("Clipboard or Explorer focus changed before paste; try again.".into());
     }
-    let handled = match &snapshot {
-        Snapshot::Image(..) => true,
-        Snapshot::Text(text) => settings.text || !super::links(text).is_empty(),
-        Snapshot::Files { cut, .. } => !cut && settings.filters(),
-        Snapshot::Unsupported => false,
+    let choice = if request.picker {
+        OnPaste::Ask
+    } else {
+        settings.paste.choose(&snapshot, settings.filters())
     };
-    if !handled {
+    let action = match choice {
+        OnPaste::Act(action) => action,
+        OnPaste::Ask => {
+            let default = settings.paste.choose(&snapshot, settings.filters());
+            match picker::choose(request, &snapshot, &settings, &default)? {
+                Some(action) => action,
+                None => {
+                    LAST_STATE.store(12, Ordering::SeqCst);
+                    return Ok(());
+                }
+            }
+        }
+    };
+    let action = match action {
+        Action::Smart if !smart_handles(&snapshot, &settings) => Action::Native,
+        action => action,
+    };
+    if action == Action::Native {
         LAST_STATE.store(9, Ordering::SeqCst);
         native_paste(request);
+        return Ok(());
+    }
+    if let Action::Ai { name, prompt } = &action
+        && (settings.picker.ai_preview || prompt.is_empty())
+    {
+        let config = settings
+            .ai
+            .clone()
+            .ok_or("AI paste is turned off in settings")?;
+        if let Ok(mut last) = LAST_FOLDER.lock() {
+            *last = Some(directory.clone());
+        }
+        LAST_STATE.store(6, Ordering::SeqCst);
+        if let Some(result) = ai_window::run(ai_window::Job {
+            config,
+            name: name.clone(),
+            prompt: prompt.clone(),
+            text: snapshot.text().unwrap_or_default().to_owned(),
+            directory: directory.clone(),
+            close_on_blur: settings.picker.close_on_blur,
+        })? {
+            LAST_STATE.store(7, Ordering::SeqCst);
+            notify(result, false);
+        }
         return Ok(());
     }
     if let Ok(mut last) = LAST_FOLDER.lock() {
@@ -628,12 +812,42 @@ fn handle(request: &Request, resolver: &ShellResolver) -> Result<(), String> {
     let progress = crate::progress::Operation::begin();
     progress_window::start(progress.reporter.clone(), directory.clone());
     LAST_STATE.store(6, Ordering::SeqCst);
-    let result = super::smart_paste(snapshot, &directory, &settings);
+    let result = match action {
+        Action::As(format) => actions::paste_as(format, snapshot, &directory, false),
+        Action::PageMarkdown => {
+            super::smart_paste(snapshot, &directory, &settings, super::LinkMode::Markdown)
+        }
+        Action::Ai { name, prompt } => match &settings.ai {
+            Some(config) => actions::paste_ai(
+                config,
+                &name,
+                &prompt,
+                &snapshot,
+                &directory,
+                actions::Format::Txt,
+                false,
+            ),
+            None => Err("AI paste is turned off in settings".into()),
+        },
+        _ => super::smart_paste(snapshot, &directory, &settings, super::LinkMode::Auto),
+    };
     progress.finish(&result);
     let result = result?;
     LAST_STATE.store(7, Ordering::SeqCst);
     notify(result, false);
     Ok(())
+}
+
+/// Whether JustPaste's own handling covers `snapshot`; otherwise Explorer pastes.
+fn smart_handles(snapshot: &Snapshot, settings: &Settings) -> bool {
+    match snapshot {
+        Snapshot::Image(..) => true,
+        Snapshot::Text(_) | Snapshot::Html { .. } => {
+            settings.text || snapshot.text().is_some_and(|t| !super::links(t).is_empty())
+        }
+        Snapshot::Files { cut, .. } => !cut && settings.filters(),
+        Snapshot::Unsupported => false,
+    }
 }
 
 fn fill(buffer: &mut [u16], value: &str) {
@@ -686,7 +900,7 @@ fn toggle(field: &str) -> Result<(), String> {
             Some(if enabled { "true" } else { "false" }),
         )
         .map_err(|e| e.to_string())?;
-    FILTERS.store(Settings::saved()?.filters(), Ordering::SeqCst);
+    publish(&Settings::saved()?);
     Ok(())
 }
 
@@ -732,9 +946,11 @@ fn startup(enabled: bool) -> Result<(), String> {
 fn menu(window: HWND) -> Result<(), String> {
     unsafe {
         let menu = CreatePopupMenu().map_err(|e| e.to_string())?;
+        let picker_line = format!("Paste as…  ·  {}", picker_label());
         let entries = [
             (0, "JustPaste", false, false),
-            (0, "Images, links && files  ·  Ctrl+V", false, false),
+            (0, "Images, text, links && files  ·  Ctrl+V", false, false),
+            (0, &picker_line, false, false),
             (6, "Open settings…", false, true),
             (
                 1,
@@ -754,7 +970,6 @@ fn menu(window: HWND) -> Result<(), String> {
                 true,
             ),
             (3, "Respect .gitignore", setting("gitignore"), true),
-            (4, "Save plain text as .txt", setting("text"), true),
             (0, "", false, false),
             (5, "Start at sign-in", startup_enabled(), true),
             (
@@ -773,6 +988,7 @@ fn menu(window: HWND) -> Result<(), String> {
             (9, "Quit JustPaste", false, true),
         ];
         for (id, label, checked, enabled) in entries {
+            let label: &str = label;
             let flags = if label.is_empty() {
                 MF_SEPARATOR
             } else {
@@ -805,7 +1021,6 @@ fn menu(window: HWND) -> Result<(), String> {
             }
             2 => toggle("ignore_node_modules")?,
             3 => toggle("gitignore")?,
-            4 => toggle("text")?,
             5 => startup(!startup_enabled())?,
             6 => open_settings()?,
             7 => {
@@ -898,7 +1113,7 @@ unsafe extern "system" fn procedure(
                 return LRESULT(0);
             }
             if let Ok(settings) = Settings::saved() {
-                FILTERS.store(settings.filters(), Ordering::SeqCst);
+                publish(&settings);
             }
             LRESULT(0)
         }
@@ -969,7 +1184,7 @@ fn background() -> Result<(), String> {
             None,
         )
         .map_err(|e| e.to_string())?;
-        FILTERS.store(Settings::saved()?.filters(), Ordering::SeqCst);
+        publish(&Settings::saved()?);
         let (sender, receiver) = sync_channel(1);
         REQUESTS
             .set(sender)
@@ -1022,7 +1237,10 @@ fn background() -> Result<(), String> {
         SetPropW(window, w!("JustPaste.Ready"), Some(HANDLE(window.0)))
             .map_err(|e| e.to_string())?;
         notify(
-            "Smart Paste is ready. Ctrl+V saves images and links in Explorer. Right-click the tray icon for copy filters.",
+            format!(
+                "Smart Paste is ready. Ctrl+V saves images and links in Explorer; {} picks a format. Click the tray icon for settings.",
+                picker_label()
+            ),
             false,
         );
         let mut message = MSG::default();
@@ -1047,13 +1265,18 @@ pub fn control(args: &[OsString]) -> Result<(), String> {
         "--background" => background(),
         "--status" => {
             println!(
-                "JustPaste Smart Paste: {}\nStart at login: {}",
+                "JustPaste Smart Paste: {}\nStart at login: {}\nCopy filters: {}",
                 if running.is_some() {
                     "running"
                 } else {
                     "stopped"
                 },
-                startup_enabled()
+                startup_enabled(),
+                if Settings::saved().is_ok_and(|settings| settings.filters()) {
+                    "on (JustPaste copies files)"
+                } else {
+                    "off (Explorer copies files)"
+                }
             );
             if let Some(window) = running {
                 let mut state = 0_usize;
@@ -1164,6 +1387,22 @@ mod tests {
     }
 
     #[test]
+    fn only_ctrl_v_and_the_one_configured_picker_chord_are_handled() {
+        // ctrl, shift, alt, win
+        assert_eq!(chord(true, false, false, false, 0), 1);
+        assert_eq!(chord(true, true, false, false, 1), 2);
+        assert_eq!(chord(true, true, false, false, 2), 0);
+        assert_eq!(chord(false, true, false, true, 2), 2);
+        assert_eq!(chord(true, false, true, false, 3), 2);
+        assert_eq!(chord(true, false, true, false, 1), 0);
+        // Alt+V, Win+V (clipboard history), and Ctrl+Win+V stay native.
+        assert_eq!(chord(false, false, true, false, 3), 0);
+        assert_eq!(chord(false, false, false, true, 2), 0);
+        assert_eq!(chord(true, false, false, true, 2), 0);
+        assert_eq!(chord(true, true, false, false, 0), 0);
+    }
+
+    #[test]
     fn caret_blinking_does_not_disable_paste_but_menus_do() {
         assert!(!gui_is_busy(0));
         assert!(!gui_is_busy(GUI_CARETBLINKING.0));
@@ -1184,6 +1423,32 @@ mod tests {
         assert!(!file_control(UIA_EditControlTypeId));
         assert!(!file_control(UIA_ComboBoxControlTypeId));
         assert!(!file_control(UIA_TreeItemControlTypeId));
+    }
+
+    #[test]
+    fn only_clipboards_smart_paste_handles_leave_explorer() {
+        const PNG: u32 = 0xC100;
+        const DESCRIPTOR: u32 = 0xC102;
+        let formats = [PNG, 0xC101, DESCRIPTOR, 0xC103];
+        let with = |held: &'static [u32]| move |format| held.contains(&format);
+        // Copied files are Explorer's unless copy filters are on, even beside an image or text.
+        assert!(!wants_clipboard(
+            false,
+            formats,
+            with(&[CF_HDROP, CF_UNICODETEXT])
+        ));
+        assert!(wants_clipboard(true, formats, with(&[CF_HDROP])));
+        // Outlook attachments, zip contents and phones are virtual files: always Explorer's.
+        assert!(!wants_clipboard(
+            true,
+            formats,
+            with(&[DESCRIPTOR, CF_UNICODETEXT])
+        ));
+        assert!(wants_clipboard(false, formats, with(&[PNG])));
+        assert!(wants_clipboard(false, formats, with(&[CF_DIB])));
+        assert!(wants_clipboard(false, formats, with(&[CF_UNICODETEXT])));
+        assert!(!wants_clipboard(false, formats, with(&[])));
+        assert!(!wants_clipboard(false, [0; 4], with(&[0])));
     }
 
     #[test]

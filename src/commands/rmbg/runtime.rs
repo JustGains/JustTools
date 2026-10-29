@@ -9,7 +9,7 @@ use directories::ProjectDirs;
 use flate2::read::GzDecoder;
 use ort::ep;
 use ort::session::{Session, builder::GraphOptimizationLevel};
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorRef};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -19,6 +19,7 @@ use crate::error::{ToolError, ToolResult};
 use super::Provider;
 use super::host;
 use super::image_pipeline::ModelSize;
+use super::model::{ModelFile, ModelSet};
 
 const TOOL: &str = "justrmbg";
 static INITIALIZED_RUNTIME: OnceLock<PathBuf> = OnceLock::new();
@@ -278,7 +279,8 @@ fn dml_cache_library() -> ToolResult<PathBuf> {
 }
 
 pub fn initialize(provider: Provider, download_approved: bool) -> ToolResult<RuntimeInfo> {
-    let requested = requested_providers(provider)?;
+    let custom = env::var_os("ORT_DYLIB_PATH").is_some_and(|value| !value.is_empty());
+    let requested = requested_providers(provider, custom)?;
     if let Some(explicit) = env::var_os("ORT_DYLIB_PATH").filter(|value| !value.is_empty()) {
         let path = PathBuf::from(explicit);
         if !path.is_absolute() {
@@ -317,7 +319,7 @@ pub fn initialize(provider: Provider, download_approved: bool) -> ToolResult<Run
     }
     if matches!(
         planned,
-        Provider::DirectMl | Provider::Cuda | Provider::CoreMl
+        Provider::DirectMl | Provider::Cuda | Provider::TensorRt | Provider::CoreMl
     ) {
         let mut runtime = initialize_custom_provider_runtime(planned)?;
         runtime.providers = requested;
@@ -1056,15 +1058,16 @@ pub struct Engine {
     session: Option<Session>,
     provider: Provider,
     uses_cpu_support: bool,
-    half_precision: bool,
+    model: ModelFile,
     size: ModelSize,
 }
 
 impl Engine {
-    /// Loads `model`, or `half` on a GPU provider when one is given.
+    /// Loads the best model file the first working provider can run (see
+    /// `Variant::preferred`): a provider that fails its probe, or cannot load
+    /// any of its files, gives way to the next one under Auto.
     pub fn create(
-        model: &Path,
-        half: Option<&Path>,
+        models: &ModelSet,
         requested: Provider,
         runtime: &RuntimeInfo,
     ) -> ToolResult<(Self, Vec<String>)> {
@@ -1072,6 +1075,12 @@ impl Engine {
         if let Some(cores) = host::fast_cores() {
             attempts.push(format!(
                 "using the {} fast cores ({}) of this CPU",
+                cores.len(),
+                host::describe(cores)
+            ));
+        } else if let Some(cores) = host::allowed_cores() {
+            attempts.push(format!(
+                "using the {} cores ({}) this process may run on",
                 cores.len(),
                 host::describe(cores)
             ));
@@ -1084,7 +1093,8 @@ impl Engine {
         }
         for provider in runtime.providers.iter().copied() {
             if provider == Provider::Cpu {
-                return Ok((Self::cpu(model)?, attempts));
+                let engine = Self::load_best(models, Provider::Cpu, false, &mut attempts)?;
+                return Ok((engine, attempts));
             }
             let probe = Self::with_provider_memory(&probe_model(), provider, false)
                 .and_then(|mut engine| engine.probe_infer());
@@ -1100,23 +1110,7 @@ impl Engine {
                 continue;
             }
             let allow_cpu_support = requested == Provider::Auto;
-            let loaded = match half {
-                Some(half) => Self::with_provider_file(half, provider, allow_cpu_support)
-                    .map(|engine| Self {
-                        half_precision: true,
-                        ..engine
-                    })
-                    .or_else(|error| {
-                        attempts.push(format!(
-                            "{} cannot run the half-precision model: {}; using the full model",
-                            provider.name(),
-                            error.message()
-                        ));
-                        Self::with_provider_file(model, provider, allow_cpu_support)
-                    }),
-                None => Self::with_provider_file(model, provider, allow_cpu_support),
-            };
-            match loaded {
+            match Self::load_best(models, provider, allow_cpu_support, &mut attempts) {
                 Ok(engine) => {
                     if engine.uses_cpu_support {
                         attempts.push(format!(
@@ -1137,20 +1131,56 @@ impl Engine {
         if requested == Provider::Auto && !runtime.auto_cpu_fallback {
             attempts.push("Auto selected CPU".to_owned());
         }
-        Ok((Self::cpu(model)?, attempts))
+        let engine = Self::load_best(models, Provider::Cpu, false, &mut attempts)?;
+        Ok((engine, attempts))
     }
 
-    pub fn cpu(model: &Path) -> ToolResult<Self> {
-        Self::with_provider_file(model, Provider::Cpu, false)
+    /// The first of `provider`'s model files that loads; each one that does not
+    /// is noted in `attempts`.
+    fn load_best(
+        models: &ModelSet,
+        provider: Provider,
+        allow_cpu_support: bool,
+        attempts: &mut Vec<String>,
+    ) -> ToolResult<Self> {
+        let mut last = None;
+        for model in models.for_provider(provider) {
+            if let Err(error) = model.verify() {
+                attempts.push(format!("not using {}: {}", model.name(), error.message()));
+                last = Some(error);
+                continue;
+            }
+            if provider == Provider::TensorRt {
+                note_tensorrt_build(&model);
+            }
+            match Self::with_provider_file(&model, provider, allow_cpu_support) {
+                Ok(engine) => {
+                    if provider == Provider::TensorRt {
+                        mark_tensorrt_ready(&model);
+                    }
+                    return Ok(engine);
+                }
+                Err(error) => {
+                    attempts.push(format!(
+                        "{} cannot run {}: {}",
+                        provider.name(),
+                        model.name(),
+                        error.message()
+                    ));
+                    last = Some(error);
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| ToolError::new(TOOL, "no model file to load")))
     }
 
     fn with_provider_file(
-        model: &Path,
+        model: &ModelFile,
         provider: Provider,
         allow_cpu_support: bool,
     ) -> ToolResult<Self> {
         let mut builder = configure_provider(session_builder()?, provider, allow_cpu_support)?;
-        let session = builder.commit_from_file(model).map_err(|error| {
+        let session = builder.commit_from_file(&model.path).map_err(|error| {
             ToolError::new(
                 TOOL,
                 format!("cannot load model with {}: {error}", provider.name()),
@@ -1161,7 +1191,7 @@ impl Engine {
             session: Some(session),
             provider,
             uses_cpu_support: provider != Provider::Cpu && allow_cpu_support,
-            half_precision: false,
+            model: model.clone(),
         })
     }
 
@@ -1182,7 +1212,10 @@ impl Engine {
             session: Some(session),
             provider,
             uses_cpu_support: provider != Provider::Cpu && allow_cpu_support,
-            half_precision: false,
+            model: ModelFile {
+                path: PathBuf::new(),
+                variant: None,
+            },
         })
     }
 
@@ -1195,19 +1228,20 @@ impl Engine {
         self.size
     }
 
-    /// Whether the loaded model is the half-precision copy.
-    pub fn is_half_precision(&self) -> bool {
-        self.half_precision
+    /// The model file in use, e.g. "rmbg-2.0-fast-fp16".
+    pub fn model_name(&self) -> String {
+        self.model.name()
     }
 
     pub fn is_gpu(&self) -> bool {
         self.provider != Provider::Cpu
     }
 
-    pub fn replace_with_cpu(&mut self, model: &Path) -> ToolResult {
+    /// Moves to the CPU with the CPU's best model file.
+    pub fn replace_with_cpu(&mut self, models: &ModelSet) -> ToolResult {
         let size = self.size;
         self.session.take();
-        let cpu = Self::cpu(model)?;
+        let cpu = Self::load_best(models, Provider::Cpu, false, &mut Vec::new())?;
         if cpu.size != size {
             return Err(ToolError::new(
                 TOOL,
@@ -1229,16 +1263,15 @@ impl Engine {
                 ),
             ));
         }
-        let input = Tensor::from_array((
-            [
-                1_usize,
-                3,
-                self.size.height as usize,
-                self.size.width as usize,
-            ],
-            chw.to_vec().into_boxed_slice(),
-        ))
-        .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
+        // The prepared picture is the input as is, without a copy.
+        let shape = [
+            1_usize,
+            3,
+            self.size.height as usize,
+            self.size.width as usize,
+        ];
+        let input = TensorRef::from_array_view((shape, chw))
+            .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
         let outputs = self
             .session
             .as_mut()
@@ -1293,7 +1326,36 @@ fn configure_provider(
         }
         Provider::Cpu => return Ok(builder),
         Provider::Cuda => ep::CUDA::default().build().error_on_failure(),
-        Provider::DirectMl => ep::DirectML::default().build().error_on_failure(),
+        Provider::TensorRt => {
+            // A half-precision engine, built once per GPU and model (minutes) and
+            // kept; CUDA runs any node TensorRT does not take.
+            let cache = tensorrt_cache_dir()?;
+            fs::create_dir_all(&cache).map_err(|error| ToolError::new(TOOL, error.to_string()))?;
+            let cache = cache.to_string_lossy().into_owned();
+            let tensorrt = ep::TensorRT::default()
+                .with_fp16(true)
+                .with_engine_cache(true)
+                .with_engine_cache_path(&cache)
+                .with_timing_cache(true)
+                .with_timing_cache_path(&cache)
+                .build()
+                .error_on_failure();
+            let cuda = ep::CUDA::default().build().error_on_failure();
+            if !allow_cpu_support {
+                builder = builder
+                    .with_disable_cpu_fallback()
+                    .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
+            }
+            return builder
+                .with_execution_providers([tensorrt, cuda])
+                .map_err(|error| {
+                    ToolError::new(TOOL, format!("TensorRT registration failed: {error}"))
+                });
+        }
+        Provider::DirectMl => ep::DirectML::default()
+            .with_performance_preference(ep::directml::PerformancePreference::HighPerformance)
+            .build()
+            .error_on_failure(),
         Provider::CoreMl => ep::CoreML::default().build().error_on_failure(),
         Provider::Auto => return Err(ToolError::new(TOOL, "Auto is not an execution provider")),
     };
@@ -1322,7 +1384,9 @@ fn session_builder() -> ToolResult<ort::session::builder::SessionBuilder> {
     let builder = builder
         .with_optimization_level(GraphOptimizationLevel::All)
         .map_err(|error| ToolError::new(TOOL, error.to_string()))?;
-    let builder = match host::fast_cores() {
+    // One thread per core it may use; left to itself, ONNX Runtime sizes and pins its pool to every
+    // core of the machine (host::allowed_cores says why that hurts)
+    let builder = match host::fast_cores().or_else(host::allowed_cores) {
         Some(cores) => builder
             .with_intra_threads(cores.len())
             .map_err(|error| ToolError::new(TOOL, error.to_string()))?,
@@ -1349,7 +1413,10 @@ fn declared_size(session: &Session) -> ModelSize {
     }
 }
 
-fn requested_providers(requested: Provider) -> ToolResult<Vec<Provider>> {
+/// The providers to try, in order. `custom` says whether the runtime is the
+/// caller's (ORT_DYLIB_PATH), which may be a GPU build with TensorRT and CUDA;
+/// otherwise Windows uses the managed DirectML runtime.
+fn requested_providers(requested: Provider, custom: bool) -> ToolResult<Vec<Provider>> {
     if requested != Provider::Auto {
         return Ok(vec![requested]);
     }
@@ -1366,20 +1433,67 @@ fn requested_providers(requested: Provider) -> ToolResult<Vec<Provider>> {
             .ok_or_else(|| {
                 ToolError::new(
                     TOOL,
-                    "RMBG_GPU_PROVIDERS accepts only directml, dml, cuda, and coreml",
+                    "RMBG_GPU_PROVIDERS accepts only directml, dml, cuda, tensorrt, and coreml",
                 )
             })?;
         if !configured.is_empty() {
             return Ok(configured);
         }
     }
-    Ok(if cfg!(target_os = "windows") {
+    // TensorRT only once its engine is built (that takes minutes, so Auto does not
+    // start it; an explicit --provider tensorrt does).
+    let tensorrt = tensorrt_ready().then_some(Provider::TensorRt);
+    Ok(if cfg!(target_os = "windows") && !custom {
         vec![Provider::DirectMl, Provider::Cuda]
+    } else if cfg!(target_os = "windows") {
+        tensorrt
+            .into_iter()
+            .chain([Provider::Cuda, Provider::DirectMl])
+            .collect()
     } else if cfg!(target_os = "macos") {
         vec![Provider::CoreMl]
     } else {
-        vec![Provider::Cuda]
+        tensorrt.into_iter().chain([Provider::Cuda]).collect()
     })
+}
+
+/// Where TensorRT keeps its engines and timing cache.
+fn tensorrt_cache_dir() -> ToolResult<PathBuf> {
+    ProjectDirs::from("com", "JustGains", "JustTools")
+        .map(|dirs| dirs.cache_dir().join("rmbg").join("tensorrt"))
+        .ok_or_else(|| ToolError::new(TOOL, "cannot determine the per-user cache directory"))
+}
+
+/// Marks that a TensorRT engine for `model` exists, so Auto may use TensorRT.
+fn mark_tensorrt_ready(model: &ModelFile) {
+    if let Ok(directory) = tensorrt_cache_dir() {
+        let _ = fs::write(directory.join(format!("{}.ready", model.name())), b"");
+    }
+}
+
+/// Whether some model's TensorRT engine has been built on this machine.
+fn tensorrt_ready() -> bool {
+    tensorrt_cache_dir()
+        .ok()
+        .and_then(|directory| fs::read_dir(directory).ok())
+        .is_some_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.path().extension().is_some_and(|ext| ext == "ready"))
+        })
+}
+
+/// Says when TensorRT is about to build an engine, which takes minutes once.
+fn note_tensorrt_build(model: &ModelFile) {
+    let built = tensorrt_cache_dir()
+        .map(|directory| directory.join(format!("{}.ready", model.name())).is_file())
+        .unwrap_or(false);
+    if !built {
+        eprintln!(
+            "{TOOL}: TensorRT is building its engine for {} on this GPU; the first time takes about 10 minutes, later starts take seconds",
+            model.name()
+        );
+    }
 }
 
 fn provider_setup(provider: Provider) -> &'static str {
@@ -1389,6 +1503,9 @@ fn provider_setup(provider: Provider) -> &'static str {
         }
         Provider::Cuda => {
             "Install an ONNX Runtime GPU build compatible with your CUDA and cuDNN versions, then set ORT_DYLIB_PATH."
+        }
+        Provider::TensorRt => {
+            "Install an ONNX Runtime GPU build with TensorRT 10, put the CUDA, cuDNN and TensorRT libraries beside it or on PATH, then set ORT_DYLIB_PATH."
         }
         Provider::CoreMl => {
             "Install a CoreML-enabled ONNX Runtime and set ORT_DYLIB_PATH to its library."

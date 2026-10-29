@@ -10,6 +10,9 @@ use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 
+/// Decimal precision used when no `--precision` is given.
+pub const DEFAULT_PRECISION: u8 = 3;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "justsvg",
@@ -18,7 +21,7 @@ use std::path::PathBuf;
 )]
 struct Cli {
     /// Decimal precision, 0-5 (default: 3).
-    #[arg(short = 'p', long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=5))]
+    #[arg(short = 'p', long, default_value_t = DEFAULT_PRECISION, value_parser = clap::value_parser!(u8).range(0..=5))]
     precision: u8,
 
     /// Disable multipass optimization.
@@ -209,7 +212,8 @@ fn optimize_once(text: &str, source: &str, precision: u8) -> Result<String> {
     nested.map_err(|error| anyhow!("{source}: {error:#}"))
 }
 
-fn optimize_svg(text: &str, source: &str, precision: u8, multipass: bool) -> Result<String> {
+/// Optimizes SVG text with the conservative preset; `source` labels errors.
+pub fn optimize_svg(text: &str, source: &str, precision: u8, multipass: bool) -> Result<String> {
     let mut best = optimize_once(text, source, precision)?;
     if multipass {
         for _ in 1..10 {

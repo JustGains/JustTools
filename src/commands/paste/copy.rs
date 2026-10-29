@@ -1,10 +1,11 @@
 //! Source-preserving filtered copies, fully planned before any output is created.
 use super::Settings;
+use rayon::prelude::*;
 use std::{
     collections::HashSet,
     fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 #[derive(Debug)]
@@ -171,49 +172,196 @@ fn ignored_file(source: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Creates the planned folders, then copies the files with the operating
+/// system's own copy (CopyFileEx on Windows: block cloning, server-side SMB
+/// copies, timestamps and attributes), several at a time so a tree of small
+/// files is not paced by one file's latency.
 pub fn execute(plan: &Plan) -> Result<usize, String> {
-    let mut count = 0;
-    for (source, destination, directory) in &plan.entries {
+    // The walk lists every folder before its contents.
+    for (source, destination, _) in plan.entries.iter().filter(|entry| entry.2) {
+        if crate::common::interrupted() {
+            return Err("cancelled; 0 completed files kept".into());
+        }
+        unchanged(source)?;
+        fs::create_dir(destination)
+            .map_err(|e| format!("cannot create {}: {e}", destination.display()))?;
+    }
+    let files: Vec<_> = plan.entries.iter().filter(|entry| !entry.2).collect();
+    let total_bytes: u64 = files
+        .iter()
+        .filter_map(|(source, ..)| fs::metadata(source).ok())
+        .map(|metadata| metadata.len())
+        .sum();
+    let copied = AtomicUsize::new(0);
+    let bytes = AtomicU64::new(0);
+    let report = |name: &std::ffi::OsStr| {
+        let percent = (total_bytes > 0)
+            .then(|| (bytes.load(Ordering::Relaxed).min(total_bytes) * 100 / total_bytes) as u32);
         crate::progress::report(
             "Copying files…",
-            source.file_name().unwrap_or_default().to_string_lossy(),
-            None,
+            format!(
+                "{} of {} · {}",
+                copied.load(Ordering::Relaxed),
+                files.len(),
+                name.to_string_lossy()
+            ),
+            percent,
         );
-        if crate::common::interrupted() {
-            return Err(format!("cancelled; {count} completed files kept"));
+    };
+    let reporter = crate::progress::current();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let result = pool.install(|| {
+        files.par_iter().try_for_each(|(source, destination, _)| {
+            crate::progress::within(reporter.as_ref(), || {
+                if crate::common::interrupted() {
+                    return Err(CANCELLED.to_owned());
+                }
+                let name = source.file_name().unwrap_or_default();
+                report(name);
+                let mut last = 0;
+                copy_file(source, destination, &mut |done| {
+                    bytes.fetch_add(done.saturating_sub(last), Ordering::Relaxed);
+                    last = done;
+                    report(name);
+                    !crate::common::interrupted()
+                })?;
+                copied.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+        })
+    });
+    let count = copied.into_inner();
+    match result {
+        Ok(()) => Ok(count),
+        Err(error) if error == CANCELLED || crate::common::interrupted() => {
+            Err(format!("cancelled; {count} completed files kept"))
         }
-        // Recheck before opening: never follow a source swapped for a junction/symlink.
-        if is_link(&fs::symlink_metadata(source).map_err(|e| e.to_string())?) {
-            return Err(format!("source changed to a link: {}", source.display()));
-        }
-        if *directory {
-            fs::create_dir(destination)
-                .map_err(|e| format!("cannot create {}: {e}", destination.display()))?;
-            continue;
-        }
-        let parent = destination.parent().ok_or("missing destination parent")?;
-        let mut temp = tempfile::Builder::new()
-            .prefix(".justpaste-")
-            .tempfile_in(parent)
-            .map_err(|e| e.to_string())?;
-        let mut input = fs::File::open(source).map_err(|e| e.to_string())?;
-        let mut buffer = vec![0; 256 * 1024];
-        loop {
-            if crate::common::interrupted() {
-                return Err(format!("cancelled; {count} completed files kept"));
-            }
-            let size = input.read(&mut buffer).map_err(|e| e.to_string())?;
-            if size == 0 {
-                break;
-            }
-            temp.write_all(&buffer[..size]).map_err(|e| e.to_string())?;
-        }
-        temp.flush().map_err(|e| e.to_string())?;
-        temp.persist_noclobber(destination)
-            .map_err(|e| e.to_string())?;
-        count += 1;
+        Err(error) => Err(error),
     }
-    Ok(count)
+}
+
+const CANCELLED: &str = "cancelled";
+
+/// Never follow a source swapped for a junction/symlink since planning.
+fn unchanged(source: &Path) -> Result<(), String> {
+    if is_link(&fs::symlink_metadata(source).map_err(|e| e.to_string())?) {
+        return Err(format!("source changed to a link: {}", source.display()));
+    }
+    Ok(())
+}
+
+/// Copies under a hidden `.justpaste-*` name beside the destination and
+/// publishes it only when complete, never over an existing file. `progress`
+/// gets the bytes copied so far and returns false to cancel.
+fn copy_file(
+    source: &Path,
+    destination: &Path,
+    progress: &mut dyn FnMut(u64) -> bool,
+) -> Result<(), String> {
+    unchanged(source)?;
+    let parent = destination.parent().ok_or("missing destination parent")?;
+    let temp = tempfile::Builder::new()
+        .prefix(".justpaste-")
+        .make_in(parent, |path| system_copy(source, path, &mut *progress))
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                CANCELLED.to_owned()
+            } else {
+                format!("cannot copy {}: {e}", source.display())
+            }
+        })?;
+    temp.persist_noclobber(destination)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// CopyFileEx into a path that must not exist yet; an existing one reports
+/// AlreadyExists, so the temporary name is retried.
+#[cfg(windows)]
+fn system_copy(
+    source: &Path,
+    target: &Path,
+    progress: &mut dyn FnMut(u64) -> bool,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{Foundation::HANDLE, Storage::FileSystem::*};
+    unsafe extern "system" fn routine(
+        _total: i64,
+        transferred: i64,
+        _stream_size: i64,
+        _stream_transferred: i64,
+        _stream: u32,
+        _reason: LPPROGRESS_ROUTINE_CALLBACK_REASON,
+        _source: HANDLE,
+        _target: HANDLE,
+        data: *const std::ffi::c_void,
+    ) -> COPYPROGRESSROUTINE_PROGRESS {
+        let progress = unsafe { &mut *(data as *mut &mut dyn FnMut(u64) -> bool) };
+        if progress(transferred.max(0) as u64) {
+            PROGRESS_CONTINUE
+        } else {
+            PROGRESS_CANCEL
+        }
+    }
+    let wide =
+        |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain(Some(0)).collect() };
+    let (from, to) = (wide(source), wide(target));
+    let mut progress = progress;
+    let copied = unsafe {
+        CopyFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            Some(routine),
+            &mut progress as *mut &mut dyn FnMut(u64) -> bool as *const std::ffi::c_void,
+            std::ptr::null_mut(),
+            COPY_FILE_FAIL_IF_EXISTS,
+        )
+    };
+    if copied != 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return Err(error);
+    }
+    let _ = fs::remove_file(target);
+    // ERROR_REQUEST_ABORTED: the progress routine cancelled.
+    if error.raw_os_error() == Some(1235) {
+        return Err(std::io::ErrorKind::Interrupted.into());
+    }
+    Err(error)
+}
+
+/// The platform copy (cloning or copy_file_range where available), keeping
+/// the modified time. Cancellation applies between files.
+#[cfg(not(windows))]
+fn system_copy(
+    source: &Path,
+    target: &Path,
+    progress: &mut dyn FnMut(u64) -> bool,
+) -> std::io::Result<()> {
+    drop(fs::File::create_new(target)?);
+    let result = (|| {
+        let copied = fs::copy(source, target)?;
+        if let Ok(modified) = fs::metadata(source).and_then(|m| m.modified()) {
+            fs::File::options()
+                .write(true)
+                .open(target)?
+                .set_modified(modified)?;
+        }
+        if !progress(copied) {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(target);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -253,6 +401,43 @@ mod tests {
         assert!(!output.join("project/node_modules").exists());
         assert!(source.join("node_modules/a/x.js").exists());
         assert!(execute(&plan).is_err());
+    }
+    #[test]
+    fn copies_many_files_keeping_contents_and_modified_times() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("tree");
+        let output = temp.path().join("out");
+        fs::create_dir_all(source.join("a/b")).unwrap();
+        fs::create_dir(&output).unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        for index in 0..200 {
+            let file = source
+                .join(if index % 2 == 0 { "a" } else { "a/b" })
+                .join(format!("{index}.txt"));
+            fs::write(&file, index.to_string()).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let plan = plan(std::slice::from_ref(&source), &output, &Settings::default()).unwrap();
+        assert_eq!(execute(&plan).unwrap(), 200);
+        for index in 0..200 {
+            let file = output
+                .join("tree")
+                .join(if index % 2 == 0 { "a" } else { "a/b" })
+                .join(format!("{index}.txt"));
+            assert_eq!(fs::read_to_string(&file).unwrap(), index.to_string());
+            assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), old);
+        }
+        let leftovers = fs::read_dir(output.join("tree/a")).unwrap().flatten();
+        assert!(
+            !leftovers
+                .into_iter()
+                .any(|e| e.file_name().to_string_lossy().starts_with(".justpaste-"))
+        );
     }
     #[test]
     fn refuses_self_copy_and_colliding_selected_names() {

@@ -414,6 +414,23 @@ impl App {
         {
             return Err("Choose either Page as Markdown or Profile photo for this paste".into());
         }
+        if self.tool.name == "justpaste"
+            && !self.value("paste_as").is_empty()
+            && (self.enabled("markdown")
+                || self.enabled("profile_photo")
+                || self.enabled("playlist"))
+        {
+            return Err(
+                "Paste as cannot be combined with Page as Markdown, Profile photo, or playlists"
+                    .into(),
+            );
+        }
+        if self.tool.name == "justpaste"
+            && !self.value("ai_prompt").is_empty()
+            && !matches!(self.value("paste_as"), "" | "txt" | "md" | "html" | "json")
+        {
+            return Err("With an AI instruction, Paste as only picks the answer's file type: .txt, .md, .html, or .json".into());
+        }
         let integer = |id: &str, label: &str, min: u32, max: u32| -> Result<(), String> {
             let value = self.value(id);
             if value.is_empty() {
@@ -527,6 +544,10 @@ impl App {
             "justport" if self.enabled("kill") => id == "json",
             "justrmbg" if self.enabled("check") => matches!(id, "input" | "output" | "model"),
             "justcommit" if !self.enabled("repair") => id == "repair_agent",
+            "justpaste" => {
+                matches!(id, "ai_service" | "ai_model" | "ai_endpoint")
+                    && self.value("ai_prompt").is_empty()
+            }
             "justpdf" => match id {
                 "degrees" => self.value("operation") != "rotate",
                 "level" => self.value("operation") != "compress",
@@ -1126,6 +1147,27 @@ pub(crate) fn quote(value: &str) -> String {
 
 fn choice(label: &'static str, value: &'static str, args: &'static [&'static str]) -> Choice {
     Choice { label, value, args }
+}
+
+fn paste_formats() -> Vec<Choice> {
+    let mut formats = vec![
+        choice("Automatic", "", &[]),
+        choice("Plain text (.txt)", "txt", &["--as", "txt"]),
+        choice("Markdown (.md)", "md", &["--as", "md"]),
+        choice("HTML (.html)", "html", &["--as", "html"]),
+        choice("JSON (.json)", "json", &["--as", "json"]),
+        choice("PNG image", "png", &["--as", "png"]),
+        choice("JPEG image", "jpg", &["--as", "jpg"]),
+        choice("WebP image", "webp", &["--as", "webp"]),
+    ];
+    if cfg!(windows) {
+        formats.push(choice("Text from image (OCR)", "ocr", &["--as", "ocr"]));
+    }
+    formats.extend([
+        choice("Transcode to MP3", "mp3", &["--as", "mp3"]),
+        choice("Transcode to MP4", "mp4", &["--as", "mp4"]),
+    ]);
+    formats
 }
 
 fn paste_actions() -> Vec<Choice> {
@@ -1810,7 +1852,7 @@ fn spec(name: &str) -> Option<Tool> {
                 number(
                     "quality",
                     "Web quality",
-                    "Visual quality used for the WebP and progressive JPEG candidates.",
+                    "Visual quality used for the WebP and progressive JPEG candidates; SVGs use the JustSVG preset.",
                     82,
                     "--quality",
                     1,
@@ -2160,6 +2202,60 @@ fn spec(name: &str) -> Option<Tool> {
                     "--output",
                     true,
                 ),
+                Field {
+                    persistent: false,
+                    ..choices(
+                        "paste_as",
+                        "Paste as",
+                        "One-run format. Automatic keeps JustPaste's usual handling; the others convert text, images, copied media, or links.",
+                        "",
+                        paste_formats(),
+                    )
+                },
+                text(
+                    "ai_prompt",
+                    "AI instruction",
+                    "One-run instruction applied to the copied or piped text, e.g. Summarize in 3 bullets. Never saved.",
+                    "",
+                    "--ai",
+                    false,
+                ),
+                choices(
+                    "ai_service",
+                    "AI service",
+                    "Used only with an AI instruction. Keys come from OPENAI_API_KEY, ANTHROPIC_API_KEY, and similar environment variables; never saved.",
+                    "openai",
+                    vec![
+                        choice("OpenAI", "openai", &["--ai-service", "openai"]),
+                        choice("Azure OpenAI", "azure", &["--ai-service", "azure"]),
+                        choice("Mistral", "mistral", &["--ai-service", "mistral"]),
+                        choice("Google Gemini", "gemini", &["--ai-service", "gemini"]),
+                        choice("Ollama (local)", "ollama", &["--ai-service", "ollama"]),
+                        choice("Foundry Local", "foundry", &["--ai-service", "foundry"]),
+                        choice(
+                            "Other OpenAI-compatible",
+                            "compatible",
+                            &["--ai-service", "compatible"],
+                        ),
+                        choice("Anthropic", "anthropic", &["--ai-service", "anthropic"]),
+                    ],
+                ),
+                text(
+                    "ai_model",
+                    "AI model",
+                    "Model or deployment name. Anthropic defaults to claude-opus-5-5; other services need one.",
+                    "",
+                    "--ai-model",
+                    true,
+                ),
+                text(
+                    "ai_endpoint",
+                    "AI endpoint URL",
+                    "Optional for hosted services; required for Azure, Foundry Local, and other OpenAI-compatible servers.",
+                    "",
+                    "--ai-endpoint",
+                    true,
+                ),
                 toggle(
                     "markdown",
                     "Page as Markdown",
@@ -2411,6 +2507,7 @@ fn spec(name: &str) -> Option<Tool> {
                         choice("CPU", "cpu", &["--provider", "cpu"]),
                         choice("DirectML", "directml", &["--provider", "directml"]),
                         choice("CUDA", "cuda", &["--provider", "cuda"]),
+                        choice("TensorRT", "tensorrt", &["--provider", "tensorrt"]),
                         choice("CoreML", "coreml", &["--provider", "coreml"]),
                     ],
                 ),

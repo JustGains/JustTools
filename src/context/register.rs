@@ -10,9 +10,10 @@
 //!
 //! Both are per-user, need no elevation, and are fully undone by `uninstall`.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use justtools_menu as menu;
 use winreg::RegKey;
@@ -32,6 +33,13 @@ const WINDOWS_11_BUILD: u32 = 22_000;
 /// copy of JustTools never refreshes or removes a menu it did not install.
 const STATE_KEY: &str = r"Software\JustGains\JustTools";
 const STATE_VALUE: &str = "ContextMenuDirectory";
+/// Set by `uninstall` so that `just install` does not add back a menu the
+/// user removed; `install` clears it.
+const REMOVED_VALUE: &str = "ContextMenuRemoved";
+/// How long one Windows PowerShell call may take. Registering a package
+/// normally takes a few seconds, but the AppX deployment service can stall
+/// indefinitely, and a stuck menu must never hang `just install`.
+const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tier {
@@ -102,10 +110,21 @@ fn quote(path: &Path) -> String {
 ///
 /// Windows PowerShell 5.1 ships with every supported Windows and carries the
 /// Appx cmdlets; PowerShell 7 only reaches them through a compatibility shim.
+/// A call that outlives [`POWERSHELL_TIMEOUT`] is stopped and reported.
 fn powershell(script: &str) -> Result<String, String> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
     let shell = Path::new(&root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-    let output = Command::new(shell)
+    // Files rather than pipes, so a full pipe can never stall the wait below.
+    let capture = || {
+        tempfile::tempfile().map_err(|error| format!("cannot capture Windows PowerShell: {error}"))
+    };
+    let (mut stdout, mut stderr) = (capture()?, capture()?);
+    let attach = |file: &std::fs::File| {
+        file.try_clone()
+            .map(Stdio::from)
+            .map_err(|error| format!("cannot capture Windows PowerShell: {error}"))
+    };
+    let mut child = Command::new(shell)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -116,13 +135,39 @@ fn powershell(script: &str) -> Result<String, String> {
         .arg(format!(
             "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; {script}"
         ))
-        .output()
+        .stdin(Stdio::null())
+        .stdout(attach(&stdout)?)
+        .stderr(attach(&stderr)?)
+        .spawn()
         .map_err(|error| format!("cannot run Windows PowerShell: {error}"))?;
-    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_owned();
-    if output.status.success() {
-        Ok(text(&output.stdout))
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < POWERSHELL_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Windows did not finish within {} seconds; restarting Windows clears a stuck app deployment",
+                    POWERSHELL_TIMEOUT.as_secs()
+                ));
+            }
+            Err(error) => return Err(format!("cannot wait for Windows PowerShell: {error}")),
+        }
+    };
+    let text = |file: &mut std::fs::File| {
+        let mut bytes = Vec::new();
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = file.read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).trim().to_owned()
+    };
+    if status.success() {
+        Ok(text(&mut stdout))
     } else {
-        let message = text(&output.stderr);
+        let message = text(&mut stderr);
         // The first line names the failure; the rest is PowerShell's position
         // and category detail.
         Err(message
@@ -160,15 +205,23 @@ fn owner() -> Option<PathBuf> {
 
 fn remember_owner(bin: &Path) -> std::io::Result<()> {
     let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(STATE_KEY)?;
-    key.set_value(STATE_VALUE, &bin.to_string_lossy().as_ref())
+    key.set_value(STATE_VALUE, &bin.to_string_lossy().as_ref())?;
+    ignore_missing(key.delete_value(REMOVED_VALUE))
 }
 
 fn forget_owner() -> std::io::Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    if let Ok(key) = hkcu.open_subkey_with_flags(STATE_KEY, winreg::enums::KEY_SET_VALUE) {
-        ignore_missing(key.delete_value(STATE_VALUE))?;
-    }
-    Ok(())
+    let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(STATE_KEY)?;
+    ignore_missing(key.delete_value(STATE_VALUE))?;
+    key.set_value(REMOVED_VALUE, &1_u32)
+}
+
+/// Whether the user removed the menu with `just context uninstall` and has
+/// not installed it since.
+pub fn removed_by_user() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(STATE_KEY)
+        .and_then(|key| key.get_value::<u32, _>(REMOVED_VALUE))
+        .is_ok_and(|value| value != 0)
 }
 
 /// Whether the registration, if any, belongs to this copy of JustTools.
@@ -353,7 +406,9 @@ pub fn install(classic_only: bool) -> ToolResult<(Tier, Option<String>)> {
                 notify_shell();
                 return Ok((Tier::Package, None));
             }
-            Err(message) => Some(format!("Windows declined the package: {message}")),
+            Err(message) => Some(format!(
+                "the top-level Windows 11 menu was not registered: {message}"
+            )),
         }
     };
     if classic_only {

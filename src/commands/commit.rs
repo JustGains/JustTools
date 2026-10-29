@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::common;
+use crate::console_status;
 use crate::deps;
 use crate::error::{ToolError, ToolResult};
 
@@ -800,7 +801,6 @@ fn append_tail(target: &mut Vec<u8>, bytes: &[u8], limit: usize) {
 }
 
 fn stage_all(repository: &Repository) -> ToolResult {
-    eprintln!("{TOOL}: staging the complete working tree ...");
     let (success, detail) = run_captured(
         Command::new(&repository.git)
             .current_dir(&repository.root)
@@ -1277,7 +1277,6 @@ fn create_commit(repository: &Repository, message: &str) -> ToolResult<String> {
 }
 
 fn push_commit(repository: &Repository, commit: &str) -> ToolResult {
-    eprintln!("{TOOL}: pushing {commit} ...");
     let (success, detail) = run_captured(
         Command::new(&repository.git)
             .current_dir(&repository.root)
@@ -1301,11 +1300,17 @@ fn push_commit(repository: &Repository, commit: &str) -> ToolResult {
 }
 
 fn execute(repository: &Repository, options: &Options, key: &str) -> ToolResult {
-    if options.stage_all {
-        stage_all(repository)?;
-    }
     let started = Instant::now();
-    let summary = collect_changes(repository)?;
+    if options.stage_all {
+        console_status::run(TOOL, "staging the complete working tree", || {
+            stage_all(repository)
+        })?;
+    } else {
+        eprintln!("{TOOL}: using the existing staged selection (--staged)");
+    }
+    let summary = console_status::run(TOOL, "scanning staged changes", || {
+        collect_changes(repository)
+    })?;
     if summary.total == 0 {
         return Err(ToolError::new(
             TOOL,
@@ -1316,38 +1321,75 @@ fn execute(repository: &Repository, options: &Options, key: &str) -> ToolResult 
             },
         ));
     }
-    let tree_before = index_tree(repository)?;
-    let instructions = instruction_file(&repository.root)?;
+    eprintln!(
+        "{TOOL}: {} staged file(s); {}",
+        summary.total,
+        summary.status_text()
+    );
+    let tree_before = console_status::run(TOOL, "recording the staged index", || {
+        index_tree(repository)
+    })?;
+    let instructions = console_status::run(TOOL, "reading commit instructions", || {
+        instruction_file(&repository.root)
+    })?;
     let patches = if options.include_patches {
-        patch_samples(repository, &summary)
+        console_status::run(TOOL, "sampling bounded text patches", || {
+            Ok(patch_samples(repository, &summary))
+        })?
     } else {
+        eprintln!("{TOOL}: patch sampling disabled (--no-patches)");
         Vec::new()
     };
-    let prompt = build_prompt(repository, &summary, instructions.as_ref(), &patches);
+    let prompt = console_status::run(TOOL, "building the bounded digest", || {
+        Ok(build_prompt(
+            repository,
+            &summary,
+            instructions.as_ref(),
+            &patches,
+        ))
+    })?;
     eprintln!(
-        "{TOOL}: analyzed {} staged file(s) in {:.2}s; asking {} ...",
-        summary.total,
-        started.elapsed().as_secs_f64(),
-        options.model
+        "{TOOL}: digest ready; {} patch sample(s), {} bytes; request timeout {}s",
+        patches.len(),
+        prompt.len(),
+        options.timeout.as_secs()
     );
-    let generation = generate_message(key, &options.model, &prompt, options.timeout)?;
+    let generation = console_status::run(
+        TOOL,
+        &format!(
+            "waiting for OpenRouter ({})",
+            single_line(&options.model, 200)
+        ),
+        || generate_message(key, &options.model, &prompt, options.timeout),
+    )?;
     println!("Summary: {}", generation.summary);
     println!("\nCommit message:\n{}", generation.message);
     if options.dry_run {
         println!("\n{TOOL}: dry run; no commit created or pushed");
         return Ok(());
     }
-    let tree_after = index_tree(repository)?;
+    let tree_after =
+        console_status::run(TOOL, "checking that the staged index is unchanged", || {
+            index_tree(repository)
+        })?;
     if tree_before != tree_after {
         return Err(ToolError::new(
             TOOL,
             "the staged index changed while the message was generated; rerun to avoid committing with a stale summary",
         ));
     }
-    let commit = create_commit(repository, &generation.message)?;
+    let commit = console_status::run(TOOL, "creating the commit (including Git hooks)", || {
+        create_commit(repository, &generation.message)
+    })?;
     if options.push {
-        push_commit(repository, &commit)?;
+        console_status::run(TOOL, &format!("pushing {commit}"), || {
+            push_commit(repository, &commit)
+        })?;
     }
+    eprintln!(
+        "{TOOL}: finished in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -1491,7 +1533,9 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         return Ok(());
     }
     let git = deps::require(TOOL, "git")?;
-    let repository = resolve_repository(git, &options.directory)?;
+    let repository = console_status::run(TOOL, "resolving the Git repository", || {
+        resolve_repository(git, &options.directory)
+    })?;
     let key = api_key(&options)?;
     match execute(&repository, &options, &key) {
         Ok(()) => Ok(()),

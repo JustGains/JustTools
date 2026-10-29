@@ -26,6 +26,14 @@ pub fn current() -> Option<Reporter> {
 pub fn cancelled() -> bool {
     current().is_some_and(|r| r.0.lock().is_ok_and(|s| s.cancelled))
 }
+/// Runs `work` on this thread as part of `reporter`'s operation, so a worker
+/// thread reports progress and sees cancellation like the thread that began it.
+pub fn within<T>(reporter: Option<&Reporter>, work: impl FnOnce() -> T) -> T {
+    let previous = CURRENT.with(|value| value.replace(reporter.cloned()));
+    let result = work();
+    CURRENT.with(|value| value.replace(previous));
+    result
+}
 pub fn stage(stage: impl Into<String>) {
     report(stage, String::new(), None);
 }

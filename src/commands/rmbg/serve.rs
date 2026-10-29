@@ -4,7 +4,9 @@
 //!
 //! Requests pass through three threads in order, so the model never waits for
 //! image work: this thread reads and decodes the next image while the model
-//! runs on the current one, and a writer thread saves the one before.
+//! runs on the current one, and a writer thread saves the one before. Command-
+//! line batches run through the same stages (`run_requests`), so both modes
+//! make the same files.
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,17 +14,15 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use image::codecs::png::CompressionType;
 use image::{ImageFormat, ImageReader};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::commands::image_ops;
 use crate::error::{ToolError, ToolResult};
 
-use super::image_pipeline::PreparedImage;
-use super::runtime::{self, Engine};
-use super::{Provider, TOOL, jobs, model};
+use super::image_pipeline::{Format, OutputOptions, PngCompression, PreparedImage, Written};
+use super::{Provider, TOOL, jobs};
 
 /// Longest accepted request line. Paths alone stay far below this; the cap
 /// keeps a runaway caller from growing one line without bound.
@@ -33,28 +33,24 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// catches up.
 const QUEUED_REQUESTS: usize = 2;
 
-pub(super) fn run(provider: Provider, download: bool, model_override: Option<&Path>) -> ToolResult {
-    // Startup mirrors a normal run, including its download permission rules.
+/// `defaults` are every request's output options (from the command line).
+pub(super) fn run(
+    provider: Provider,
+    download: bool,
+    model_override: Option<&Path>,
+    full_precision: bool,
+    defaults: &OutputOptions,
+) -> ToolResult {
     let started = Instant::now();
-    let runtime = runtime::initialize(provider, download)?;
-    eprintln!("Runtime: {} ({})", runtime.path.display(), runtime.source);
-    let model_path = model::resolve(model_override, download)?;
-    eprintln!("Model: {}", model_path.display());
-    let half = model::half_precision(model_override, &model_path, provider);
-    let load_started = Instant::now();
-    let (mut engine, attempts) = Engine::create(&model_path, half.as_deref(), provider, &runtime)?;
-    for attempt in attempts {
-        eprintln!("{TOOL}: {attempt}");
-    }
+    let mut session =
+        super::Session::start(provider, download, model_override, full_precision, report)?;
     // The first inference prepares the GPU for this model and takes seconds;
     // running it now keeps that wait out of the first request.
-    let size = engine.size();
-    let blank = vec![0.0; 3 * size.pixels()];
-    super::infer_with_fallback(&mut engine, &model_path, provider, &blank, report)?;
+    session.warm_up(report)?;
     eprintln!(
         "Model loaded in {:.1}s — selected provider: {}",
-        load_started.elapsed().as_secs_f64(),
-        super::provider_label(&engine)
+        started.elapsed().as_secs_f64(),
+        session.label()
     );
 
     let mut stdout = io::stdout();
@@ -62,35 +58,34 @@ pub(super) fn run(provider: Provider, download: bool, model_override: Option<&Pa
         &mut stdout,
         &Ready {
             ready: true,
-            provider: engine.provider().name(),
+            provider: session.provider_name(),
+            model: session.model_name(),
             load_seconds: seconds(started.elapsed()),
+            pictures: true,
         },
     )?;
     eprintln!("{TOOL}: serving; send one JSON request per stdin line");
+    let protected = session.protected_paths();
+    let size = session.size();
+    let (engine, fallback) = session.parts();
     serve_lines(
         &mut io::stdin().lock(),
         &mut stdout,
+        defaults,
         |request| {
-            let output = check_request(request, &model_path)?;
-            Ok((PreparedImage::load(&request.input, size)?, output))
+            check_request(request, &protected)?;
+            PreparedImage::load(&request.input, size)
+                .map(|prepared| (prepared, absolute(&request.output), request.options.clone()))
         },
-        |(prepared, output)| {
+        |(prepared, output, options)| {
             // The engine is shared, so a GPU-to-CPU fallback lasts for every
             // later request too.
-            let mask = super::infer_with_fallback(
-                &mut engine,
-                &model_path,
-                provider,
-                &prepared.chw,
-                report,
-            )?;
-            Ok((prepared, mask, output))
+            let mask = super::infer_with_fallback(engine, fallback, &prepared.chw, report)?;
+            Ok((prepared, mask, output, options))
         },
-        |(prepared, mask, output)| {
-            // Callers of a resident model usually convert its cutouts, so
-            // speed matters more than file size here.
-            prepared.write_with_mask(&mask, &output, CompressionType::Fast)?;
-            Ok(output)
+        |(prepared, mask, output, options)| {
+            let written = prepared.write_with_mask(&mask, &output, &options)?;
+            Ok((output, written))
         },
     )
 }
@@ -99,32 +94,39 @@ pub(super) fn run(provider: Provider, download: bool, model_override: Option<&Pa
 struct Ready {
     ready: bool,
     provider: &'static str,
+    model: String,
     load_seconds: f64,
+    /// Requests may ask for a finished picture (cropped, padded, scaled, WebP).
+    pictures: bool,
 }
 
 #[derive(Debug, PartialEq)]
-struct Request {
-    id: String,
-    input: PathBuf,
-    output: PathBuf,
+pub(super) struct Request {
+    pub id: String,
+    pub input: PathBuf,
+    pub output: PathBuf,
+    pub options: OutputOptions,
 }
 
 /// Why a line is not a usable request; `id` is echoed when it was readable.
 #[derive(Debug, PartialEq)]
-struct Rejected {
-    id: Option<String>,
-    message: String,
+pub(super) struct Rejected {
+    pub id: Option<String>,
+    pub message: String,
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum Response {
+pub(super) enum Response {
     Success {
         id: String,
         ok: bool,
         output: String,
         seconds: f64,
         stages: Stages,
+        width: u32,
+        height: u32,
+        bytes: u64,
     },
     Failure {
         id: Option<String>,
@@ -133,23 +135,35 @@ enum Response {
     },
 }
 
-/// Seconds a request spent in each step. Its `seconds` also counts the time it
-/// waited behind earlier requests.
+/// Seconds a request spent in each step: decoding and scaling (`prepare`),
+/// waiting for the model behind earlier requests (`wait`), in the model
+/// (`infer`), and making and saving the cut-out (`write`). Its `seconds` also
+/// counts the time it waited to be written.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
-struct Stages {
-    prepare: f64,
-    infer: f64,
-    write: f64,
+pub(super) struct Stages {
+    pub prepare: f64,
+    pub wait: f64,
+    pub infer: f64,
+    pub write: f64,
 }
 
 impl Response {
-    fn success(id: String, output: &Path, elapsed: Duration, stages: Stages) -> Self {
+    fn success(
+        id: String,
+        output: &Path,
+        elapsed: Duration,
+        stages: Stages,
+        written: Written,
+    ) -> Self {
         Self::Success {
             id,
             ok: true,
             output: output.to_string_lossy().into_owned(),
             seconds: seconds(elapsed),
             stages,
+            width: written.width,
+            height: written.height,
+            bytes: written.bytes,
         }
     }
 
@@ -167,6 +181,7 @@ enum Step<T> {
     Working {
         id: String,
         read: Instant,
+        ready: Instant,
         stages: Stages,
         work: T,
     },
@@ -175,14 +190,15 @@ enum Step<T> {
 
 /// Answers every non-blank line until end of input, in order. `prepare` runs
 /// on this thread as each line is read, `infer` on a second thread and `write`
-/// (which returns the absolute output path) on a third, so three requests can
-/// be in progress at once.
+/// (which returns the absolute output path and what it wrote) on a third, so
+/// three requests can be in progress at once.
 fn serve_lines<R, W, P, Q>(
     input: &mut R,
     output: &mut W,
-    mut prepare: impl FnMut(&Request) -> ToolResult<P>,
+    defaults: &OutputOptions,
+    prepare: impl FnMut(&Request) -> ToolResult<P>,
     infer: impl FnMut(P) -> ToolResult<Q> + Send,
-    write: impl FnMut(Q) -> ToolResult<PathBuf> + Send,
+    write: impl FnMut(Q) -> ToolResult<(PathBuf, Written)> + Send,
 ) -> ToolResult
 where
     R: BufRead,
@@ -190,26 +206,31 @@ where
     P: Send,
     Q: Send,
 {
-    thread::scope(|scope| {
-        let (to_model, model_queue) = mpsc::sync_channel(QUEUED_REQUESTS);
-        let (to_writer, writer_queue) = mpsc::sync_channel(QUEUED_REQUESTS);
-        let model = scope.spawn(move || run_model(model_queue, to_writer, infer));
-        let writer = scope.spawn(move || write_answers(writer_queue, output, write));
-        let read = read_requests(input, &to_model, &mut prepare);
-        drop(to_model);
-        let stopped = |_| ToolError::new(TOOL, "a serve thread stopped unexpectedly");
-        model.join().map_err(stopped)?;
-        // A writer that cannot write (stdout closed) is why reading stopped early.
-        writer.join().map_err(stopped)??;
-        read
-    })
+    let mut failed = None;
+    let requests = std::iter::from_fn(|| match next_line(input, defaults) {
+        Ok(Some(line)) => Some(line),
+        Ok(None) => None,
+        Err(error) => {
+            failed = Some(error);
+            None
+        }
+    });
+    run_requests(
+        requests,
+        |response| write_line(output, &response),
+        prepare,
+        infer,
+        write,
+    )?;
+    failed.map_or(Ok(()), Err)
 }
 
-fn read_requests<R: BufRead, P>(
+/// The next request line, parsed: `None` at end of input. Blank lines are
+/// skipped; an oversized line is consumed and rejected.
+fn next_line<R: BufRead>(
     input: &mut R,
-    next: &SyncSender<Step<P>>,
-    prepare: &mut impl FnMut(&Request) -> ToolResult<P>,
-) -> ToolResult {
+    defaults: &OutputOptions,
+) -> ToolResult<Option<Result<Request, Rejected>>> {
     let read_error = |error: io::Error| ToolError::new(TOOL, format!("cannot read stdin: {error}"));
     let mut line = Vec::new();
     loop {
@@ -220,26 +241,50 @@ fn read_requests<R: BufRead, P>(
             .read_until(b'\n', &mut line)
             .map_err(read_error)?;
         if read == 0 {
-            return Ok(());
+            return Ok(None);
         }
-        let step = if line.len() > MAX_REQUEST_BYTES && line.last() != Some(&b'\n') {
+        if line.len() > MAX_REQUEST_BYTES && line.last() != Some(&b'\n') {
             input.skip_until(b'\n').map_err(read_error)?;
-            Step::Answered(Response::failure(
-                None,
-                format!("request line exceeds {MAX_REQUEST_BYTES} bytes"),
-            ))
-        } else {
-            let text = line.trim_ascii();
-            if text.is_empty() {
-                continue;
-            }
-            match parse_request(text) {
+            return Ok(Some(Err(Rejected {
+                id: None,
+                message: format!("request line exceeds {MAX_REQUEST_BYTES} bytes"),
+            })));
+        }
+        let text = line.trim_ascii();
+        if !text.is_empty() {
+            return Ok(Some(parse_request(text, defaults)));
+        }
+    }
+}
+
+/// Runs requests through the three stages and hands each answer, in request
+/// order, to `answer` (on the writer thread). Stops early only when `answer`
+/// fails, and returns that error.
+pub(super) fn run_requests<P, Q>(
+    requests: impl Iterator<Item = Result<Request, Rejected>>,
+    mut answer: impl FnMut(Response) -> ToolResult + Send,
+    mut prepare: impl FnMut(&Request) -> ToolResult<P>,
+    infer: impl FnMut(P) -> ToolResult<Q> + Send,
+    write: impl FnMut(Q) -> ToolResult<(PathBuf, Written)> + Send,
+) -> ToolResult
+where
+    P: Send,
+    Q: Send,
+{
+    thread::scope(|scope| {
+        let (to_model, model_queue) = mpsc::sync_channel(QUEUED_REQUESTS);
+        let (to_writer, writer_queue) = mpsc::sync_channel(QUEUED_REQUESTS);
+        let model = scope.spawn(move || run_model(model_queue, to_writer, infer));
+        let writer = scope.spawn(move || write_answers(writer_queue, &mut answer, write));
+        for request in requests {
+            let step = match request {
                 Ok(request) => {
                     let read = Instant::now();
                     match prepare(&request) {
                         Ok(work) => Step::Working {
                             id: request.id,
                             read,
+                            ready: Instant::now(),
                             stages: Stages {
                                 prepare: seconds(read.elapsed()),
                                 ..Stages::default()
@@ -252,13 +297,17 @@ fn read_requests<R: BufRead, P>(
                     }
                 }
                 Err(rejected) => Step::Answered(Response::failure(rejected.id, rejected.message)),
+            };
+            if to_model.send(step).is_err() {
+                // The writer stopped and reports why.
+                break;
             }
-        };
-        if next.send(step).is_err() {
-            // The writer stopped and reports why.
-            return Ok(());
         }
-    }
+        drop(to_model);
+        let stopped = |_| ToolError::new(TOOL, "a serve thread stopped unexpectedly");
+        model.join().map_err(stopped)?;
+        writer.join().map_err(stopped)?
+    })
 }
 
 fn run_model<P, Q>(
@@ -271,16 +320,19 @@ fn run_model<P, Q>(
             Step::Working {
                 id,
                 read,
+                ready,
                 mut stages,
                 work,
             } => {
                 let started = Instant::now();
+                stages.wait = seconds(started.duration_since(ready));
                 match infer(work) {
                     Ok(work) => {
                         stages.infer = seconds(started.elapsed());
                         Step::Working {
                             id,
                             read,
+                            ready,
                             stages,
                             work,
                         }
@@ -296,10 +348,10 @@ fn run_model<P, Q>(
     }
 }
 
-fn write_answers<W: Write, Q>(
+fn write_answers<Q>(
     queue: Receiver<Step<Q>>,
-    output: &mut W,
-    mut write: impl FnMut(Q) -> ToolResult<PathBuf>,
+    answer: &mut impl FnMut(Response) -> ToolResult,
+    mut write: impl FnMut(Q) -> ToolResult<(PathBuf, Written)>,
 ) -> ToolResult {
     for step in queue {
         let response = match step {
@@ -308,24 +360,25 @@ fn write_answers<W: Write, Q>(
                 read,
                 mut stages,
                 work,
+                ..
             } => {
                 let started = Instant::now();
                 match write(work) {
-                    Ok(path) => {
+                    Ok((path, written)) => {
                         stages.write = seconds(started.elapsed());
-                        Response::success(id, &path, read.elapsed(), stages)
+                        Response::success(id, &path, read.elapsed(), stages, written)
                     }
                     Err(error) => Response::failure(Some(id), error.message()),
                 }
             }
             Step::Answered(response) => response,
         };
-        write_line(output, &response)?;
+        answer(response)?;
     }
     Ok(())
 }
 
-fn parse_request(line: &[u8]) -> Result<Request, Rejected> {
+fn parse_request(line: &[u8], defaults: &OutputOptions) -> Result<Request, Rejected> {
     let reject = |id: Option<&str>, message: String| Rejected {
         id: id.map(str::to_owned),
         message,
@@ -355,13 +408,98 @@ fn parse_request(line: &[u8]) -> Result<Request, Rejected> {
     Ok(Request {
         input: path("input")?,
         output: path("output")?,
+        options: request_options(&fields, defaults).map_err(|message| reject(Some(id), message))?,
         id: id.to_owned(),
     })
 }
 
+/// A request's output options: the server's defaults, or with `picture`
+/// (true, or an object of options) the finished-picture settings; then the
+/// request's own fields. Fields are the command line's options in camelCase.
+fn request_options(
+    fields: &Map<String, Value>,
+    defaults: &OutputOptions,
+) -> Result<OutputOptions, String> {
+    let mut options = defaults.clone();
+    match fields.get("picture") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => options = OutputOptions::picture(),
+        Some(Value::Object(picture)) => {
+            options = OutputOptions::picture();
+            apply_options(&mut options, picture, "picture.")?;
+        }
+        Some(_) => return Err("request \"picture\" must be true or an object".to_owned()),
+    }
+    apply_options(&mut options, fields, "")?;
+    Ok(options)
+}
+
+fn apply_options(
+    options: &mut OutputOptions,
+    fields: &Map<String, Value>,
+    prefix: &str,
+) -> Result<(), String> {
+    let number = |name: &str, low: u64, high: u64| -> Result<Option<u64>, String> {
+        match fields.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (low..=high).contains(value))
+                .map(Some)
+                .ok_or_else(|| {
+                    format!(
+                        "request \"{prefix}{name}\" must be a whole number from {low} to {high}"
+                    )
+                }),
+        }
+    };
+    if let Some(value) = fields.get("format").filter(|value| !value.is_null()) {
+        options.format =
+            Some(value.as_str().and_then(Format::parse).ok_or_else(|| {
+                format!("request \"{prefix}format\" must be \"png\" or \"webp\"")
+            })?);
+    }
+    if let Some(value) = fields.get("crop").filter(|value| !value.is_null()) {
+        options.crop = value
+            .as_bool()
+            .ok_or_else(|| format!("request \"{prefix}crop\" must be true or false"))?;
+    }
+    if let Some(value) = number("padding", 0, 10_000)? {
+        options.padding = value as u32;
+    }
+    if let Some(value) = number("maxWidth", 1, 100_000)? {
+        options.max_width = Some(value as u32);
+    }
+    if let Some(value) = number("maxHeight", 1, 100_000)? {
+        options.max_height = Some(value as u32);
+    }
+    if let Some(value) = number("quality", 0, 100)? {
+        options.quality = value as u8;
+    }
+    if let Some(value) = number("alphaQuality", 0, 100)? {
+        options.alpha_quality = value as u8;
+    }
+    if let Some(value) = number("method", 0, 6)? {
+        options.method = value as u8;
+    }
+    if let Some(value) = fields.get("compression").filter(|value| !value.is_null()) {
+        options.png = match value.as_str() {
+            Some("fast") => PngCompression::Fast,
+            Some("small") => PngCompression::Small,
+            _ => {
+                return Err(format!(
+                    "request \"{prefix}compression\" must be \"fast\" or \"small\""
+                ));
+            }
+        };
+    }
+    Ok(())
+}
+
 /// Rejects requests that cannot or must not run, before any decoding, and
-/// returns the absolute output path.
-fn check_request(request: &Request, model: &Path) -> ToolResult<PathBuf> {
+/// makes the output path absolute. `protected` are files that must never be
+/// written over (the model files in use).
+pub(super) fn check_request(request: &Request, protected: &[PathBuf]) -> ToolResult<()> {
     let input = &request.input;
     if !input.exists() {
         return Err(ToolError::new(
@@ -412,8 +550,15 @@ fn check_request(request: &Request, model: &Path) -> ToolResult<PathBuf> {
         input: input.clone(),
         output,
     };
-    jobs::reject_model_overwrite(std::slice::from_ref(&job), model)?;
-    Ok(job.output)
+    for model in protected {
+        jobs::reject_model_overwrite(std::slice::from_ref(&job), model)?;
+    }
+    Ok(())
+}
+
+/// The absolute form of a request's output, as answers report it.
+pub(super) fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn sniffed_format(path: &Path) -> Option<ImageFormat> {
@@ -439,8 +584,8 @@ fn report(message: &str) {
     eprintln!("{message}");
 }
 
-fn seconds(elapsed: Duration) -> f64 {
-    (elapsed.as_secs_f64() * 100.0).round() / 100.0
+pub(super) fn seconds(elapsed: Duration) -> f64 {
+    (elapsed.as_secs_f64() * 1000.0).round() / 1000.0
 }
 
 #[cfg(test)]
@@ -456,12 +601,19 @@ mod tests {
         String::from_utf8(output).unwrap()
     }
 
+    const WRITTEN: Written = Written {
+        width: 3,
+        height: 2,
+        bytes: 99,
+    };
+
     fn served(input: impl AsRef<[u8]>) -> (Vec<Value>, Vec<String>) {
         let mut output = Vec::new();
         let mut processed = Vec::new();
         serve_lines(
             &mut Cursor::new(input),
             &mut output,
+            &OutputOptions::default(),
             |request| {
                 processed.push(request.id.clone());
                 if request.input.ends_with("missing.png") {
@@ -477,7 +629,7 @@ mod tests {
                     Ok(output)
                 }
             },
-            |output| Ok(PathBuf::from("/abs").join(output)),
+            |output| Ok((PathBuf::from("/abs").join(output), WRITTEN)),
         )
         .unwrap();
         let text = String::from_utf8(output).unwrap();
@@ -493,6 +645,7 @@ mod tests {
     fn parses_a_valid_request_and_ignores_extra_fields() {
         let request = parse_request(
             br#"{"id":"7","input":"C:\\frames\\in.webp","output":"out.png","note":1}"#,
+            &OutputOptions::default(),
         )
         .unwrap();
         assert_eq!(
@@ -501,8 +654,104 @@ mod tests {
                 id: "7".into(),
                 input: PathBuf::from(r"C:\frames\in.webp"),
                 output: PathBuf::from("out.png"),
+                options: OutputOptions::default(),
             }
         );
+    }
+
+    #[test]
+    fn picture_requests_start_from_the_picture_settings() {
+        let request = parse_request(
+            br#"{"id":"p","input":"in.png","output":"out.webp","picture":{"maxHeight":300,"padding":4}}"#,
+            &OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            request.options,
+            OutputOptions {
+                max_height: Some(300),
+                padding: 4,
+                ..OutputOptions::picture()
+            }
+        );
+        let plain = parse_request(
+            br#"{"id":"p","input":"in.png","output":"out.webp","picture":true}"#,
+            &OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(plain.options, OutputOptions::picture());
+        let own = parse_request(
+            br#"{"id":"o","input":"in.png","output":"o.png","crop":true,"maxWidth":64,"format":"png","quality":90,"alphaQuality":100,"method":6,"compression":"small"}"#,
+            &OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            own.options,
+            OutputOptions {
+                format: Some(Format::Png),
+                crop: true,
+                max_width: Some(64),
+                quality: 90,
+                alpha_quality: 100,
+                method: 6,
+                png: PngCompression::Small,
+                ..OutputOptions::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_servers_defaults_apply_until_a_request_names_its_own() {
+        let defaults = OutputOptions::picture();
+        let request = parse_request(
+            br#"{"id":"d","input":"a.png","output":"b.webp"}"#,
+            &defaults,
+        )
+        .unwrap();
+        assert_eq!(request.options, defaults);
+        let request = parse_request(
+            br#"{"id":"d","input":"a.png","output":"b.png","format":"png","crop":false,"maxHeight":null}"#,
+            &defaults,
+        )
+        .unwrap();
+        assert_eq!(request.options.format, Some(Format::Png));
+        assert!(!request.options.crop);
+        assert_eq!(request.options.max_height, Some(400));
+    }
+
+    #[test]
+    fn bad_options_are_rejected_with_the_id() {
+        for (line, field) in [
+            (
+                r#"{"id":"b","input":"a","output":"b","picture":"yes"}"#,
+                "picture",
+            ),
+            (
+                r#"{"id":"b","input":"a","output":"b","format":"gif"}"#,
+                "format",
+            ),
+            (r#"{"id":"b","input":"a","output":"b","crop":1}"#, "crop"),
+            (
+                r#"{"id":"b","input":"a","output":"b","maxHeight":0}"#,
+                "maxHeight",
+            ),
+            (
+                r#"{"id":"b","input":"a","output":"b","quality":101}"#,
+                "quality",
+            ),
+            (
+                r#"{"id":"b","input":"a","output":"b","picture":{"method":9}}"#,
+                "picture.method",
+            ),
+            (
+                r#"{"id":"b","input":"a","output":"b","compression":"zip"}"#,
+                "compression",
+            ),
+        ] {
+            let rejected = parse_request(line.as_bytes(), &OutputOptions::default()).unwrap_err();
+            assert_eq!(rejected.id.as_deref(), Some("b"), "{line}");
+            assert!(rejected.message.contains(field), "{}", rejected.message);
+        }
     }
 
     #[test]
@@ -515,7 +764,7 @@ mod tests {
             r#"{"input":"a.png","output":"b.png"}"#,
             r#"{"id":5,"input":"a.png","output":"b.png"}"#,
         ] {
-            let rejected = parse_request(line.as_bytes()).unwrap_err();
+            let rejected = parse_request(line.as_bytes(), &OutputOptions::default()).unwrap_err();
             assert_eq!(rejected.id, None, "{line}");
             assert!(!rejected.message.is_empty());
         }
@@ -529,7 +778,7 @@ mod tests {
             (r#"{"id":"a1","input":"","output":"out.png"}"#, "input"),
             (r#"{"id":"a1","input":"in.png","output":7}"#, "output"),
         ] {
-            let rejected = parse_request(line.as_bytes()).unwrap_err();
+            let rejected = parse_request(line.as_bytes(), &OutputOptions::default()).unwrap_err();
             assert_eq!(rejected.id.as_deref(), Some("a1"), "{line}");
             assert!(rejected.message.contains(field), "{}", rejected.message);
         }
@@ -540,11 +789,13 @@ mod tests {
         let ready = Ready {
             ready: true,
             provider: "DirectML",
+            model: "rmbg-2.0-fast-fp16".into(),
             load_seconds: seconds(Duration::from_millis(9_104)),
+            pictures: true,
         };
         assert_eq!(
             line_of(&ready),
-            "{\"ready\":true,\"provider\":\"DirectML\",\"load_seconds\":9.1}\n"
+            "{\"ready\":true,\"provider\":\"DirectML\",\"model\":\"rmbg-2.0-fast-fp16\",\"load_seconds\":9.104,\"pictures\":true}\n"
         );
     }
 
@@ -557,13 +808,15 @@ mod tests {
             Duration::from_millis(923),
             Stages {
                 prepare: 0.05,
+                wait: 0.0,
                 infer: 0.31,
                 write: 0.02,
             },
+            WRITTEN,
         ));
         assert_eq!(
             success,
-            r#"{"id":"x\"1","ok":true,"output":"C:\\cut \"outs\"\\frame-0.png","seconds":0.92,"stages":{"prepare":0.05,"infer":0.31,"write":0.02}}"#
+            r#"{"id":"x\"1","ok":true,"output":"C:\\cut \"outs\"\\frame-0.png","seconds":0.923,"stages":{"prepare":0.05,"wait":0.0,"infer":0.31,"write":0.02},"width":3,"height":2,"bytes":99}"#
                 .to_owned()
                 + "\n"
         );
@@ -596,6 +849,9 @@ mod tests {
         assert!(lines[0]["output"].as_str().unwrap().ends_with("a-out.png"));
         assert!(lines[0]["seconds"].is_f64());
         assert!(lines[0]["stages"]["infer"].is_f64());
+        assert!(lines[0]["stages"]["wait"].is_f64());
+        assert_eq!(lines[0]["width"], 3);
+        assert_eq!(lines[0]["bytes"], 99);
         assert_eq!(lines[1]["id"], Value::Null);
         assert_eq!(lines[1]["ok"], false);
         assert_eq!(lines[2]["id"], "2");
@@ -622,6 +878,7 @@ mod tests {
         serve_lines(
             &mut Cursor::new(input),
             &mut output,
+            &OutputOptions::default(),
             |request| {
                 prepared.send(request.id.clone()).unwrap();
                 Ok(request.id.clone())
@@ -638,7 +895,7 @@ mod tests {
                     .any(|id| id == "3");
                     assert!(ahead, "request 3 was not read while request 1 was written");
                 }
-                Ok(PathBuf::from(id))
+                Ok((PathBuf::from(id), WRITTEN))
             },
         )
         .unwrap();
@@ -670,12 +927,13 @@ mod tests {
         let error = serve_lines(
             &mut Cursor::new(input),
             &mut Closed,
+            &OutputOptions::default(),
             |request| {
                 read += 1;
                 Ok(request.output.clone())
             },
             Ok,
-            Ok,
+            |output| Ok((output, WRITTEN)),
         )
         .unwrap_err();
         assert!(error.message().contains("cannot write to stdout"));
@@ -715,22 +973,23 @@ mod tests {
         image::RgbaImage::new(2, 2).save(&input).unwrap();
         let model = folder.join("model.onnx");
         fs::write(&model, b"not a real model").unwrap();
+        let half = folder.join("model-fp16.onnx");
+        fs::write(&half, b"not a real model either").unwrap();
+        let protected = [model.clone(), half.clone()];
         let check = |input: &Path, output: &Path| {
             check_request(
                 &Request {
                     id: "1".into(),
                     input: input.to_path_buf(),
                     output: output.to_path_buf(),
+                    options: OutputOptions::default(),
                 },
-                &model,
+                &protected,
             )
         };
 
         let output = folder.join("cut.png");
-        assert_eq!(
-            check(&input, &output).unwrap(),
-            std::path::absolute(&output).unwrap()
-        );
+        check(&input, &output).unwrap();
 
         let gif = folder.join("misnamed-gif.png");
         image::RgbaImage::new(2, 2)
@@ -746,6 +1005,7 @@ mod tests {
             (gif, output.clone(), "GIF"),
             (input.clone(), input.clone(), "overwrite the input"),
             (input.clone(), model.clone(), "overwrite the ONNX model"),
+            (input.clone(), half.clone(), "overwrite the ONNX model"),
             (input.clone(), folder.to_path_buf(), "output is a directory"),
             (
                 input.clone(),

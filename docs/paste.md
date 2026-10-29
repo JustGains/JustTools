@@ -24,6 +24,12 @@ justpaste --dry-run --clipboard                    # list the links; no network
 ```
 
 ```sh
+justpaste --clipboard --as md                      # rich text as Markdown
+justpaste --clipboard --as ocr                     # text from a screenshot (Windows)
+justpaste --clipboard --ai "Summarize it" --ai-service anthropic
+```
+
+```sh
 printf '%s\n' 'https://github.com/owner/repo' | justpaste -o projects
 printf '%s\n' 'Save this text' | justpaste --text -o notes
 just paste --copy project --output existing-folder --dry-run
@@ -35,6 +41,76 @@ needs `--text`; repository and download links take priority over text saving.
 On Windows, right-click a folder or its empty background and choose
 **JustTools ▸ JustPaste · paste here**; see the
 [context menu guide](context-menu.md).
+
+## Paste as (Advanced Paste)
+
+JustPaste covers the options of PowerToys Advanced Paste, aimed at folders: the
+clipboard always becomes a new file, and nothing is typed into other apps.
+
+| Format | Takes | Saves |
+| --- | --- | --- |
+| `txt` | Text or rich text | `Text <date time>.txt`, UTF-8 |
+| `md` | Text or rich text | Markdown; copied HTML keeps headings, lists, links, tables, and emphasis |
+| `html` | Text or rich text | A standalone UTF-8 page holding the copied fragment (plain text is escaped) |
+| `json` | Text | Pretty JSON from JSON, XML, CSV/TSV with a header row, INI, or `key: value` lines; other text becomes a JSON string |
+| `png`, `jpg`, `webp` | An image (or one image file with `--copy`) | `Image <date time>.<ext>`; PNG and WebP keep alpha, JPEG is flattened onto white |
+| `ocr` | An image | `Image text <date time>.txt`, read locally by the Windows OCR engine (Windows only) |
+| `mp3`, `mp4` | Copied audio/video files, `--copy` media, or links | Transcoded with JustMP3/JustVideo in a hidden workspace; sources are kept |
+
+```sh
+justpaste --clipboard --as md                  # copied web page selection -> .md
+printf 'name,count\nApples,3\n' | justpaste --as json
+justpaste --clipboard --as ocr                 # screenshot text -> .txt (Windows)
+justpaste --as jpg --copy screenshot.png -o exports
+justpaste --as mp3 --copy talk.mov             # keeps talk.mov
+justpaste --as mp4 https://www.youtube.com/watch?v=ID
+```
+
+Every result is published atomically under an unused name, and `--dry-run`
+writes nothing. A format that does not fit the clipboard fails before anything
+is written; `--as` cannot be combined with `--markdown`, `--profile-photo`, or
+`--playlist`.
+
+### AI paste
+
+AI paste is off until it is enabled in settings or requested with `--ai`. It
+sends only the copied (or piped) text and the instruction to the configured
+service and saves the answer as a new file, `.txt` unless `--as md`, `html`, or
+`json` picks the extension.
+
+```sh
+justpaste --clipboard --ai "Summarize in three bullets" --ai-service anthropic
+justpaste --clipboard --ai-action fix-spelling --ai-service openai --ai-model YOUR_MODEL
+justpaste --clipboard --ai-action Summarize --saved-settings   # a saved custom action
+printf 'notes' | justpaste --ai "Translate to French" --ai-service ollama --ai-model llama3.2
+```
+
+| Service (`--ai-service`) | Endpoint | Key from the environment |
+| --- | --- | --- |
+| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `azure` | `--ai-endpoint https://NAME.openai.azure.com`, `--ai-deployment`, optional `--ai-api-version` (default `2024-10-21`) | `AZURE_OPENAI_API_KEY` |
+| `mistral` | `https://api.mistral.ai/v1` | `MISTRAL_API_KEY` |
+| `gemini` | Google's OpenAI-compatible endpoint | `GEMINI_API_KEY` |
+| `ollama` | `http://localhost:11434/v1` | none |
+| `foundry` | Foundry Local's URL, such as `http://localhost:5273/v1` | none |
+| `compatible` | Any OpenAI-compatible `/v1` URL (LM Studio, vLLM, a gateway) | optional |
+| `anthropic` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
+
+`JUSTPASTE_AI_API_KEY` is a fallback key for every service. `--ai-endpoint`
+overrides any endpoint. Anthropic defaults to `claude-opus-5-5` and lets the
+API retry a declined request on a model it chooses; every other service needs
+`--ai-model` (Azure can use the deployment name instead). OpenAI requests are
+first checked with OpenAI's moderation endpoint, as in PowerToys; flagged text
+is not transformed, and `--no-ai-moderation` skips the check.
+`--ai-system-prompt` adds standing instructions. Keys are read like the
+Cloudflare token: from the process environment or, on Windows, the stored user
+environment. They stay in memory and never appear in defaults, errors, or the
+Headless footer. A model's answer is saved as given apart from one wrapping
+code fence; review it before relying on it.
+
+**Fix spelling and grammar** is built in (`--ai-action fix-spelling`). Custom
+actions are saved one per line as `Name: instruction` (up to 20) in settings;
+the CLI runs them by name with `--saved-settings`.
 
 ## Smart Paste in Explorer (Windows)
 
@@ -52,20 +128,64 @@ into that folder. For example, `https://github.com/owner/repo` creates a `repo`
 subfolder. The right-click JustPaste action and `--clipboard` use the same
 repository detection.
 
-With Explorer's filesystem file pane focused, **Ctrl+V** saves a clipboard
-image as PNG or downloads copied links into the active tab's folder. Actual
-image data takes priority over a browser's accompanying URL. Address-bar,
+With Explorer's filesystem file pane focused, **Ctrl+V** applies one saved
+choice per kind of clipboard content:
+
+| Clipboard | Ctrl+V choices (default first) |
+| --- | --- |
+| Text or rich text | Leave to Explorer, `.txt`, Markdown, HTML, JSON, or ask |
+| Image | PNG, JPEG, WebP, text from image (OCR), or ask |
+| Links | Download/clone/save the page, page as Markdown (Cloudflare), MP4, MP3, or ask |
+| Audio and video files | Copy normally, transcode to MP4 or MP3, or ask |
+
+The older **Save plain text as .txt** setting still selects `.txt` until a
+text choice is saved. Copied files that are not all media keep the copy-filter
+rules below. "Ask" opens the picker.
+
+### The paste-as picker
+
+Instead of one shortcut per format, JustPaste has a single picker shortcut,
+**Ctrl+Shift+V** by default (Win+Shift+V, Ctrl+Alt+V, or off in settings). In
+Explorer's file pane it opens a menu at the cursor listing only the actions
+that fit the clipboard: **Paste normally**, JustPaste's own download/copy
+handling, Markdown pages, every paste-as format, transcoding, and, with AI
+enabled, Fix spelling and grammar, each custom action, and **Paste with AI…**.
+Entries are numbered 1–9 and 0 for the keyboard, the Ctrl+V choice is bold,
+and Esc closes the menu without pasting. A header line describes the clipboard
+(image size, link count, or the first words of text) unless the clipboard
+preview is turned off; it never shows paths.
+
+AI actions open a review window when **Review answers before saving** is on
+(PowerToys' custom preview): the instruction, the answer to read or edit, and
+Save. **Paste with AI…** always opens it so an instruction can be typed. The
+window can close when it loses focus. With review off, a custom action saves
+its answer directly with the progress window.
+
+By default, Ctrl+V saves a clipboard image as PNG or downloads copied links
+into the active tab's folder. Actual image data takes priority over a browser's
+accompanying URL. Address-bar,
 search, rename, other-app, and unsupported/virtual-folder pastes stay native.
-The destination and clipboard are checked at activation; switching folders
+Ctrl+V is only taken when the clipboard holds an image, text, or (with copy
+filters on) copied files. Anything else, such as normal file copies with
+filters off, Outlook attachments, or files dragged out of a zip or phone, goes
+straight to Explorer with no delay. The destination and clipboard are checked at activation; switching folders
 during a download does not redirect its output. There is no clipboard history
 or copy-time downloading.
 
 Click the violet-and-blue tray icon to open **JustPaste settings**, or run
-`just paste --settings`. The native window has copy filters, custom ignored
-paths, text-to-file, and sign-in startup. **Save changes** validates the paths
-and saves the filters together; **Cancel** leaves them unchanged. Saved fields
+`just paste --settings`. The native window has three tabs: **Paste** (the
+Ctrl+V choices, the picker shortcut, clipboard preview, which picker actions
+are offered, and sign-in startup), **AI** (enable, service, model, endpoint,
+Azure deployment and API version, system prompt, OpenAI moderation, review
+before saving, close on focus loss, Fix spelling, Paste with AI…, and custom
+actions), and **Copy filters**. **Save changes** validates paths, custom
+actions, and the AI configuration and saves everything together; **Cancel**
+leaves it unchanged. No API key is ever entered or saved there. Saved fields
 take effect without restarting Smart Paste. Settings also opens when the
 resident is stopped and does not need a console.
+Opening settings from the tray does not request administrator rights or process
+breakaway, so it also works when the resident is inside a restricted Windows
+process job. The background resident's startup detachment remains separate.
 
 Right-click the icon for **Open settings…**, **Pause Smart Paste**, the copy
 filters, **Start at sign-in**, **Open last folder**, **Cancel current paste**,
@@ -80,7 +200,8 @@ does not stop Smart Paste. If the host forbids independent processes, startup
 reports an error instead of starting a listener that will disappear with it;
 start Smart Paste from the Explorer launcher in that case. Login startup remains
 a separate opt-in. The right-click JustPaste action retains the
-normal console result and uses `--clipboard --saved-settings`. Explorer's own
+normal console result and uses `--clipboard --saved-settings`, so it follows
+the same saved Ctrl+V choices ("ask" falls back to the default handling). Explorer's own
 mouse **Paste** command is unchanged; use **JustPaste** for filtered mouse
 pasting. Only ordinary File Explorer windows are hooked, not Desktop or
 application file dialogs. No administrator service or extra executable is used.
@@ -94,7 +215,8 @@ current stream; a video may download audio separately before combining them.
 window hides progress while the paste continues. Successful pastes close the
 window automatically; errors stay visible until dismissed.
 
-`--status` also shows pause/busy state, the last Explorer paste decision, and
+`--status` shows whether copy filters are on (JustPaste copies files) or off
+(Explorer copies files), and also pause/busy state, the last Explorer paste decision, and
 the last notification, so an error remains readable after its balloon disappears.
 That notification is kept only in memory and may include a saved filename.
 `--diagnose` checks the current focus and each open shell view without displaying
@@ -144,8 +266,11 @@ and refuse selected links, self/descendant destinations, or ambiguous selected
 names before writing. Existing output roots receive numbered names; files are
 published atomically and never overwritten. Cancellation/errors keep completed
 files and directories, with no incomplete file published under its final name.
-This is a content copy, not a filesystem backup: ACLs, alternate streams, and
-timestamps are not promised.
+Files are copied with the system copy (CopyFileEx on Windows, which keeps
+modified times, attributes, and alternate streams and uses block cloning or
+server-side copies where the volume offers them), several files at a time.
+Elsewhere the platform copy keeps modified times. ACLs are not copied; this is
+not a filesystem backup.
 
 The bare launcher saves filter settings atomically. Explicit headless calls use
 only their supplied flags unless `--saved-settings` is passed. Saved output
@@ -293,5 +418,6 @@ or SSH setup. Unattended clones do not open sign-in or SSH password prompts.
 Repository-only CLI pastes do not resolve or update yt-dlp or FFmpeg.
 
 Bare `justpaste` opens the launcher. A blank **Links** row pastes the
-clipboard; **Output folder** and **Download playlists** are saved, and the
-links themselves never are.
+clipboard; **Output folder**, **Download playlists**, and the AI service,
+model, and endpoint are saved. The links, **Paste as**, and the **AI
+instruction** apply to one run and are never saved.

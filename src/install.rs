@@ -28,6 +28,7 @@ struct Options {
     bin_directory: Option<PathBuf>,
     yes: bool,
     add_path: bool,
+    context_menu: bool,
     help: bool,
 }
 
@@ -51,13 +52,18 @@ replaced.
 
 On Windows, also installs PowerShell launchers for mkcd, justmkcd, just,
 claude_, and codex_. Shell integration loads automatically; no init or profile
-edit is needed. The File Explorer context-menu extension is installed when it
-sits beside the executable; `just context install` then adds the menu.
+edit is needed. When the File Explorer extension sits beside the executable,
+the right-click menu is added for the current user, or refreshed if this
+installation already registered it. A menu removed with `just context
+uninstall` stays removed.
 
 Options:
       --bin-dir DIR  Installation directory
   -y, --yes          Skip replacement and PATH confirmations
       --no-path      Do not offer to add the directory to PATH
+      --no-context-menu
+                     Do not add the File Explorer menu (Windows); an
+                     existing menu is still refreshed
   -h, --help         Show this help
 
 Environment:
@@ -70,6 +76,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
         bin_directory: None,
         yes: false,
         add_path: true,
+        context_menu: true,
         help: false,
     };
     let mut index = 0;
@@ -79,6 +86,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
             "-h" | "--help" => options.help = true,
             "-y" | "--yes" => options.yes = true,
             "--no-path" => options.add_path = false,
+            "--no-context-menu" => options.context_menu = false,
             "--bin-dir" => {
                 index += 1;
                 let value = args
@@ -658,9 +666,12 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     {
         // The registration belongs to the installed copy, which also knows
         // whether a menu is registered at all.
-        let refreshed = std::process::Command::new(bin.join(executable_name("just")))
-            .args(["context", "refresh"])
-            .status();
+        let mut refresh = std::process::Command::new(bin.join(executable_name("just")));
+        refresh.args(["context", "refresh"]);
+        if options.context_menu {
+            refresh.arg("--add");
+        }
+        let refreshed = refresh.status();
         if !refreshed.is_ok_and(|status| status.success()) {
             eprintln!("just: run `just context install` to refresh the File Explorer menu");
         }

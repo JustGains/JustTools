@@ -134,7 +134,8 @@ impl Tool {
             Tool::Mp3 => (within(VIDEO) || within(AUDIO)) && extension != "mp3",
             Tool::Audio => (within(VIDEO) || within(AUDIO)) && extension != "m4a",
             Tool::Wav => (within(VIDEO) || within(AUDIO)) && extension != "wav",
-            Tool::Optimize | Tool::Resize | Tool::Jpg | Tool::Rmbg => within(STILL),
+            Tool::Optimize => within(STILL) || extension == "svg",
+            Tool::Resize | Tool::Jpg | Tool::Rmbg => within(STILL),
             Tool::Webp => within(WEBP_SOURCES),
             Tool::Avif => within(AVIF_SOURCES),
             Tool::Png => extension == "png",
@@ -781,6 +782,15 @@ mod tests {
             action("video.1080").unwrap().args,
             ["--resolution", "1080p"].as_slice()
         );
+    }
+
+    #[test]
+    fn svgs_offer_optimize_beside_and_in_place() {
+        let items = menu(&selection(&["logo.svg"]));
+        let titles = titles(&items);
+        assert!(titles.contains(&"JustOptimize · smallest web format"));
+        assert!(titles.contains(&"JustSVG · optimize in place"));
+        assert!(!titles.contains(&"JustResize · fit 1920 px (default)"));
     }
 
     #[test]

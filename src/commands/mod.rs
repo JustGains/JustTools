@@ -84,7 +84,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     },
     CommandInfo {
         name: "justoptimize",
-        description: "choose the smallest web-ready PNG, WebP, or JPEG safely",
+        description: "choose the smallest web-ready PNG, WebP, or JPEG, and optimize SVG, safely",
     },
     CommandInfo {
         name: "justpaste",

@@ -42,7 +42,8 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Shell::{
     BHID_DataObject, DragQueryFileW, ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECF_ISSEPARATOR, ECS_ENABLED,
     ECS_HIDDEN, HDROP, IEnumExplorerCommand, IEnumExplorerCommand_Impl, IExplorerCommand,
-    IExplorerCommand_Impl, IFolderView, IShellItem, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
+    IExplorerCommand_Impl, IFolderView, IObjectWithSelection, IObjectWithSelection_Impl,
+    IShellItem, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
 use windows::core::{
@@ -173,12 +174,22 @@ struct Shared {
     /// The menu resolved for the current selection.
     items: RefCell<Vec<Item>>,
     paths: RefCell<Vec<String>>,
+    /// Classic Explorer supplies this through IObjectWithSelection, and later
+    /// callbacks may omit their IShellItemArray. Keep it until replaced/cleared.
+    selected: RefCell<Option<IShellItemArray>>,
     site: RefCell<Option<IUnknown>>,
 }
 
 impl Shared {
     fn selection(&self, items: Option<&IShellItemArray>) -> Vec<String> {
+        // Release the borrow before calling back into the Shell.
+        let selected = self
+            .selected
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.clone());
         let mut paths = items
+            .or(selected.as_ref())
             .map(|items| unsafe { selected_paths(items) })
             .unwrap_or_default();
         if paths.is_empty() {
@@ -192,6 +203,11 @@ impl Shared {
 
     /// Resolve and remember the menu for a fresh selection.
     fn refresh(&self, items: Option<&IShellItemArray>) -> bool {
+        if let Some(items) = items
+            && let Ok(mut slot) = self.selected.try_borrow_mut()
+        {
+            *slot = Some(items.clone());
+        }
         let paths = self.selection(items);
         let resolved = menu::menu(&summarize(&paths));
         let visible = !resolved.is_empty();
@@ -206,7 +222,7 @@ impl Shared {
 }
 
 /// One menu entry. `item` is `None` for the top-level JustTools entry.
-#[implement(IExplorerCommand, IObjectWithSite)]
+#[implement(IExplorerCommand, IObjectWithSite, IObjectWithSelection)]
 struct Command {
     item: Option<Item>,
     shared: Rc<Shared>,
@@ -223,6 +239,9 @@ impl Command {
         if self.item.is_some() {
             return Vec::new();
         }
+        // EnumSubCommands is not guaranteed to follow GetState. In particular,
+        // the classic menu can start with SetSelection or GetTitle instead.
+        self.shared.refresh(None);
         self.shared
             .items
             .try_borrow()
@@ -238,7 +257,10 @@ impl Drop for Command {
 }
 
 impl IExplorerCommand_Impl for Command_Impl {
-    fn GetTitle(&self, _items: Ref<'_, IShellItemArray>) -> Result<PWSTR> {
+    fn GetTitle(&self, items: Ref<'_, IShellItemArray>) -> Result<PWSTR> {
+        if self.item.is_none() {
+            self.shared.refresh(items.as_ref());
+        }
         let title = self
             .item
             .as_ref()
@@ -317,6 +339,31 @@ impl IExplorerCommand_Impl for Command_Impl {
 
     fn EnumSubCommands(&self) -> Result<IEnumExplorerCommand> {
         Ok(Commands::create(self.children(), 0, self.shared.clone()))
+    }
+}
+
+impl IObjectWithSelection_Impl for Command_Impl {
+    fn SetSelection(&self, items: Ref<'_, IShellItemArray>) -> Result<()> {
+        if let Ok(mut slot) = self.shared.selected.try_borrow_mut() {
+            *slot = items.as_ref().cloned();
+        }
+        self.shared.refresh(None);
+        Ok(())
+    }
+
+    fn GetSelection(&self, interface: *const GUID, result: *mut *mut c_void) -> Result<()> {
+        if result.is_null() || interface.is_null() {
+            return Err(E_POINTER.into());
+        }
+        unsafe { *result = std::ptr::null_mut() };
+        let selected = self
+            .shared
+            .selected
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .ok_or(E_FAIL)?;
+        unsafe { selected.query(interface, result).ok() }
     }
 }
 
@@ -539,5 +586,140 @@ pub extern "system" fn DllCanUnloadNow() -> HRESULT {
         S_OK
     } else {
         S_FALSE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::UI::Shell::{
+        SHCreateItemFromParsingName, SHCreateShellItemArrayFromShellItem,
+    };
+
+    struct SelectionFixture(PathBuf);
+
+    impl SelectionFixture {
+        fn new() -> Self {
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+                .ok()
+                .unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "justtools-shell-{}-{} [selection] café.json",
+                std::process::id(),
+                LAUNCHES.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::write(&path, b"{}").unwrap();
+            Self(path)
+        }
+
+        fn items(&self) -> IShellItemArray {
+            let item: IShellItem =
+                unsafe { SHCreateItemFromParsingName(&HSTRING::from(self.0.as_os_str()), None) }
+                    .unwrap();
+            unsafe { SHCreateShellItemArrayFromShellItem(&item) }.unwrap()
+        }
+    }
+
+    impl Drop for SelectionFixture {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.0).unwrap();
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    fn titles(command: &IExplorerCommand) -> Vec<String> {
+        let commands = unsafe { command.EnumSubCommands() }.unwrap();
+        let mut titles = Vec::new();
+        loop {
+            let mut next = [None];
+            let mut fetched = 0;
+            unsafe { commands.Next(&mut next, Some(&mut fetched)) }
+                .ok()
+                .unwrap();
+            let Some(command) = next[0].take() else {
+                assert_eq!(fetched, 0);
+                break;
+            };
+            assert_eq!(fetched, 1);
+            let title = unsafe { command.GetTitle(None) }.unwrap();
+            titles.push(unsafe { title.to_string() }.unwrap());
+            unsafe { CoTaskMemFree(Some(title.0.cast())) };
+        }
+        titles
+    }
+
+    #[test]
+    fn classic_selection_populates_children_without_get_state() {
+        let fixture = SelectionFixture::new();
+        let shared = Rc::new(Shared::default());
+        let root = Command::create(None, shared.clone());
+        let selection: IObjectWithSelection = root.cast().unwrap();
+        unsafe { selection.SetSelection(&fixture.items()) }.unwrap();
+        let items: IShellItemArray = unsafe { selection.GetSelection() }.unwrap();
+        assert_eq!(
+            unsafe { selected_paths(&items) },
+            vec![fixture.0.to_string_lossy()]
+        );
+        assert!(
+            titles(&root)
+                .iter()
+                .any(|title| title.starts_with("JustJSON"))
+        );
+        assert_eq!(shared.selection(None), vec![fixture.0.to_string_lossy()]);
+
+        // A later callback with no array must retain the selection, rather
+        // than resolve the parent folder (or wipe the flyout).
+        assert_eq!(
+            unsafe { root.GetState(None, false) }.unwrap(),
+            ECS_ENABLED.0 as u32
+        );
+        assert!(
+            titles(&root)
+                .iter()
+                .any(|title| title.starts_with("JustJSON"))
+        );
+
+        unsafe { selection.SetSelection(None) }.unwrap();
+        assert!(unsafe { selection.GetSelection::<IShellItemArray>() }.is_err());
+        assert!(titles(&root).is_empty());
+        assert!(shared.selection(None).is_empty());
+    }
+
+    #[test]
+    fn title_can_supply_selection_before_state_or_enumeration() {
+        let fixture = SelectionFixture::new();
+        let root = Command::create(None, Rc::new(Shared::default()));
+        let title = unsafe { root.GetTitle(&fixture.items()) }.unwrap();
+        unsafe { CoTaskMemFree(Some(title.0.cast())) };
+        assert!(
+            titles(&root)
+                .iter()
+                .any(|title| title.starts_with("JustJSON"))
+        );
+    }
+
+    #[test]
+    fn modern_state_supplies_selection_and_child_commands_stay_flat() {
+        let fixture = SelectionFixture::new();
+        let root = Command::create(None, Rc::new(Shared::default()));
+        assert_eq!(
+            unsafe { root.GetState(&fixture.items(), false) }.unwrap(),
+            ECS_ENABLED.0 as u32
+        );
+        assert!(
+            titles(&root)
+                .iter()
+                .any(|title| title.starts_with("JustJSON"))
+        );
+        let commands = unsafe { root.EnumSubCommands() }.unwrap();
+        let mut next = [None];
+        unsafe { commands.Next(&mut next, None) }.ok().unwrap();
+        let child = next[0].take().unwrap();
+        assert_ne!(
+            unsafe { child.GetFlags() }.unwrap(),
+            ECF_HASSUBCOMMANDS.0 as u32
+        );
+        assert!(titles(&child).is_empty());
     }
 }

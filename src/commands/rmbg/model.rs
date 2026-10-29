@@ -95,39 +95,186 @@ fn require_override(path: &Path, source: &str) -> ToolResult<PathBuf> {
     }
 }
 
-/// The half-precision copy beside a managed model, for GPU providers: on
-/// DirectML it cuts out in about half the time and memory with the same masks.
-/// An explicit model (`--model`, `RMBG_MODEL`) is always used as given, and a
-/// copy that fails its pinned SHA-256 is skipped with a warning.
-pub fn half_precision(
-    explicit: Option<&Path>,
-    model: &Path,
-    provider: Provider,
-) -> Option<PathBuf> {
-    let overridden =
-        explicit.is_some() || env::var_os("RMBG_MODEL").is_some_and(|value| !value.is_empty());
-    if overridden || provider == Provider::Cpu {
-        return None;
-    }
-    verified_beside(
-        model,
-        HALF_MODEL_NAME,
-        MAX_HALF_MODEL_BYTES,
-        HALF_MODEL_SHA256,
-    )
+/// A model file justrmbg can run. `Official` is BRIA's own ONNX export (the
+/// managed download); the others are made from the same weights for one kind
+/// of device and live beside it (see docs/rmbg.md, "Model files"):
+///
+/// - `OfficialHalf`: BRIA's export in half precision.
+/// - `Fast`: a fixed 1024 x 1024 export whose deformable convolutions sample
+///   every kernel point in one bilinear resample (GridSample) instead of
+///   BRIA's gathers. TensorRT builds its half-precision engine from it.
+/// - `FastHalf`: `Fast` in half precision, except where the deformable
+///   convolutions compute and take their samples (float32). The GPU default.
+/// - `Cpu`: the same convolutions one kernel point at a time, which keeps
+///   memory low; twice as fast as BRIA's export on a CPU.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Variant {
+    Official,
+    OfficialHalf,
+    Fast,
+    FastHalf,
+    Cpu,
 }
 
-fn verified_beside(model: &Path, name: &str, max_bytes: u64, expected: &str) -> Option<PathBuf> {
-    let path = model.with_file_name(name);
-    if !path.is_file() {
-        return None;
-    }
-    match verify_file(&path, max_bytes, expected) {
-        Ok(()) => Some(path),
-        Err(error) => {
-            eprintln!("{TOOL}: not using {name}: {}", error.message());
-            None
+struct VariantFile {
+    variant: Variant,
+    name: &'static str,
+    sha256: &'static str,
+    max_bytes: u64,
+}
+
+/// Made with docs/rmbg.md's exact versions; a copy with another hash is skipped.
+const VARIANT_FILES: [VariantFile; 4] = [
+    VariantFile {
+        variant: Variant::OfficialHalf,
+        name: HALF_MODEL_NAME,
+        sha256: HALF_MODEL_SHA256,
+        max_bytes: MAX_HALF_MODEL_BYTES,
+    },
+    VariantFile {
+        variant: Variant::Fast,
+        name: "rmbg-2.0-fast.onnx",
+        sha256: "d779938f65415623c01adff5016f1ab34cde6855d750b5a11610cd7f934536b2",
+        max_bytes: 1_100_000_000,
+    },
+    VariantFile {
+        variant: Variant::FastHalf,
+        name: "rmbg-2.0-fast-fp16.onnx",
+        sha256: "28454a831e24573b60fbe2e135163a64d132f9b40a3405c550b014c661cd370d",
+        max_bytes: 600_000_000,
+    },
+    VariantFile {
+        variant: Variant::Cpu,
+        name: "rmbg-2.0-cpu.onnx",
+        sha256: "8ab5fa6664ca12cc8592ea4ed9a7af48d4f6782ab239b1776a69793cd40e27fb",
+        max_bytes: 1_100_000_000,
+    },
+];
+
+impl Variant {
+    /// The file's name without `.onnx`, as status lines and serve mode report it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Official => "rmbg-2.0",
+            Self::OfficialHalf => "rmbg-2.0-fp16",
+            Self::Fast => "rmbg-2.0-fast",
+            Self::FastHalf => "rmbg-2.0-fast-fp16",
+            Self::Cpu => "rmbg-2.0-cpu",
         }
+    }
+
+    /// The model files to try on `provider`, best first. Measured on an RTX
+    /// 4090 and an i9-13900K (docs/rmbg.md): `FastHalf` takes 76 ms on DirectML
+    /// against 156 for `OfficialHalf`; TensorRT runs `Fast` in 31 ms; `Cpu`
+    /// takes 7.5 s against 14 for BRIA's export. `full` keeps float32 on GPUs
+    /// (masks exactly like PyTorch's, about twice as slow).
+    pub fn preferred(provider: Provider, full: bool) -> &'static [Variant] {
+        use Variant::*;
+        match provider {
+            Provider::Cpu => &[Cpu, Official],
+            Provider::TensorRt => &[Fast, Official],
+            Provider::DirectMl | Provider::Cuda if full => &[Fast, Official],
+            Provider::DirectMl | Provider::Cuda => &[FastHalf, OfficialHalf, Fast, Official],
+            // CoreML has not been measured with the new files: as before.
+            Provider::CoreMl if full => &[Official],
+            Provider::CoreMl => &[OfficialHalf, Official],
+            Provider::Auto => &[Official],
+        }
+    }
+}
+
+/// One model file to try.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelFile {
+    pub path: PathBuf,
+    /// `None` for an explicit model (`--model`, `RMBG_MODEL`).
+    pub variant: Option<Variant>,
+}
+
+impl ModelFile {
+    /// Checks a file beside the managed model against its pinned SHA-256 (the
+    /// managed model itself and explicit models were checked when resolved).
+    pub fn verify(&self) -> ToolResult {
+        let Some(file) = self
+            .variant
+            .and_then(|variant| VARIANT_FILES.iter().find(|file| file.variant == variant))
+        else {
+            return Ok(());
+        };
+        verify_file(&self.path, file.max_bytes, file.sha256)
+    }
+
+    pub fn name(&self) -> String {
+        match self.variant {
+            Some(variant) => variant.name().to_owned(),
+            None => self.path.file_stem().map_or_else(
+                || "model".to_owned(),
+                |stem| stem.to_string_lossy().into_owned(),
+            ),
+        }
+    }
+}
+
+/// The model files a run may use: an explicit model alone, or the managed
+/// model and the verified files beside it.
+#[derive(Clone, Debug)]
+pub struct ModelSet {
+    official: PathBuf,
+    explicit: bool,
+    full_precision: bool,
+}
+
+impl ModelSet {
+    pub fn new(model: &Path, explicit: Option<&Path>, full_precision: bool) -> Self {
+        let explicit =
+            explicit.is_some() || env::var_os("RMBG_MODEL").is_some_and(|value| !value.is_empty());
+        Self {
+            official: model.to_path_buf(),
+            explicit,
+            full_precision,
+        }
+    }
+
+    /// The files to try on `provider`, best first: those present beside the
+    /// managed model, which ends every list. Check each with `verify` before
+    /// loading it, so only the file actually used is hashed.
+    pub fn for_provider(&self, provider: Provider) -> Vec<ModelFile> {
+        if self.explicit {
+            return vec![ModelFile {
+                path: self.official.clone(),
+                variant: None,
+            }];
+        }
+        Variant::preferred(provider, self.full_precision)
+            .iter()
+            .filter_map(|&variant| {
+                if variant == Variant::Official {
+                    return Some(ModelFile {
+                        path: self.official.clone(),
+                        variant: Some(variant),
+                    });
+                }
+                let file = VARIANT_FILES.iter().find(|file| file.variant == variant)?;
+                let path = self.official.with_file_name(file.name);
+                path.is_file().then_some(ModelFile {
+                    path,
+                    variant: Some(variant),
+                })
+            })
+            .collect()
+    }
+
+    /// Every model file beside the managed model, so outputs never overwrite one.
+    pub fn protected(&self) -> Vec<PathBuf> {
+        let mut paths = vec![self.official.clone()];
+        if !self.explicit {
+            paths.extend(
+                VARIANT_FILES
+                    .iter()
+                    .map(|file| self.official.with_file_name(file.name)),
+            );
+        }
+        paths
     }
 }
 
@@ -146,6 +293,14 @@ fn verify_file(path: &Path, max_bytes: u64, expected: &str) -> ToolResult {
             TOOL,
             format!("model has an invalid size: {}", path.display()),
         ));
+    }
+    // A file verified before and unchanged since (same size and modification
+    // time) is not hashed again: that took about a second per gigabyte on every
+    // start.
+    let stamp = verification_stamp(&metadata, expected);
+    let record = verification_record(path);
+    if stamp.is_some() && fs::read_to_string(&record).ok() == stamp {
+        return Ok(());
     }
     let mut reader = BufReader::new(
         fs::File::open(path).map_err(|error| ToolError::new(TOOL, error.to_string()))?,
@@ -172,7 +327,30 @@ fn verify_file(path: &Path, max_bytes: u64, expected: &str) -> ToolResult {
         ));
     }
     eprintln!("{TOOL}: verified model SHA-256 at {}", path.display());
+    if let Some(stamp) = stamp {
+        // Best effort: without the record the next start hashes again.
+        let _ = fs::write(&record, stamp);
+    }
     Ok(())
+}
+
+/// Where a model's verification is remembered: `<file>.verified` beside it.
+fn verification_record(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".verified");
+    path.with_file_name(name)
+}
+
+/// What a verified file looked like: its expected hash, size and modification
+/// time, or `None` when the system cannot say when it was modified.
+fn verification_stamp(metadata: &fs::Metadata, expected: &str) -> Option<String> {
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{expected} {} {modified}\n", metadata.len()))
 }
 
 fn cache_model_path() -> ToolResult<PathBuf> {
@@ -416,45 +594,114 @@ mod tests {
     use zip::{CompressionMethod, ZipWriter};
 
     #[test]
-    fn half_precision_is_only_for_gpus_with_a_managed_model() {
-        let directory = tempfile::tempdir().unwrap();
-        let model = directory.path().join(MODEL_NAME);
-        fs::write(&model, b"full").unwrap();
-        assert_eq!(half_precision(None, &model, Provider::DirectMl), None);
-        fs::write(
-            model.with_file_name(HALF_MODEL_NAME),
-            b"not the pinned model",
-        )
-        .unwrap();
-        for (explicit, provider) in [
-            (None, Provider::DirectMl),
-            (None, Provider::Cpu),
-            (Some(model.as_path()), Provider::DirectMl),
+    fn each_provider_tries_its_best_files_first_and_the_managed_model_last() {
+        use Variant::*;
+        assert_eq!(Variant::preferred(Provider::Cpu, false), [Cpu, Official]);
+        assert_eq!(
+            Variant::preferred(Provider::TensorRt, false),
+            [Fast, Official]
+        );
+        for gpu in [Provider::DirectMl, Provider::Cuda] {
+            assert_eq!(
+                Variant::preferred(gpu, false),
+                [FastHalf, OfficialHalf, Fast, Official]
+            );
+            assert_eq!(Variant::preferred(gpu, true), [Fast, Official]);
+        }
+        for provider in [
+            Provider::Cpu,
+            Provider::TensorRt,
+            Provider::DirectMl,
+            Provider::Cuda,
+            Provider::CoreMl,
+            Provider::Auto,
         ] {
-            assert_eq!(half_precision(explicit, &model, provider), None);
+            for full in [false, true] {
+                assert_eq!(Variant::preferred(provider, full).last(), Some(&Official));
+            }
         }
     }
 
     #[test]
-    fn a_copy_beside_the_model_is_used_only_when_verified() {
+    fn files_beside_the_managed_model_are_offered_and_used_only_when_verified() {
         let directory = tempfile::tempdir().unwrap();
         let model = directory.path().join(MODEL_NAME);
+        fs::write(&model, b"full").unwrap();
+        let official = ModelFile {
+            path: model.clone(),
+            variant: Some(Variant::Official),
+        };
+        let set = ModelSet::new(&model, None, false);
+        assert_eq!(
+            set.for_provider(Provider::DirectMl),
+            std::slice::from_ref(&official)
+        );
+        official.verify().unwrap();
+        for file in &VARIANT_FILES {
+            fs::write(model.with_file_name(file.name), b"not the pinned model").unwrap();
+        }
+        let offered = set.for_provider(Provider::DirectMl);
+        let names: Vec<String> = offered.iter().map(ModelFile::name).collect();
+        assert_eq!(
+            names,
+            [
+                "rmbg-2.0-fast-fp16",
+                "rmbg-2.0-fp16",
+                "rmbg-2.0-fast",
+                "rmbg-2.0"
+            ]
+        );
+        for file in &offered[..3] {
+            assert!(file.verify().is_err(), "{}", file.name());
+        }
+        assert_eq!(set.for_provider(Provider::Cpu).len(), 2);
+        assert_eq!(set.protected().len(), 1 + VARIANT_FILES.len());
+
+        let explicit = ModelSet::new(&model, Some(&model), false);
+        let only = explicit.for_provider(Provider::DirectMl);
+        assert_eq!(only.len(), 1);
+        assert_eq!(
+            (only[0].variant, only[0].name()),
+            (None, "rmbg-2.0".to_owned())
+        );
+        only[0].verify().unwrap();
+        assert_eq!(explicit.protected(), [model]);
+    }
+
+    #[test]
+    fn a_verified_file_is_not_hashed_again_until_it_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model.onnx");
+        let bytes = b"verified once";
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        fs::write(&path, bytes).unwrap();
+        verify_file(&path, 100, &hash).unwrap();
+        let record = verification_record(&path);
+        assert!(record.is_file());
+        // the record vouches for the file as it was, under this hash only
+        verify_file(&path, 100, &hash).unwrap();
+        assert!(verify_file(&path, 100, MODEL_SHA256).is_err());
+        fs::write(&path, b"changed, and longer than before").unwrap();
+        assert!(verify_file(&path, 100, &hash).is_err());
+    }
+
+    #[test]
+    fn a_file_is_verified_against_its_size_limit_and_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("half.onnx");
         let bytes = b"half precision test model";
         let hash = format!("{:x}", Sha256::digest(bytes));
-        assert_eq!(verified_beside(&model, "half.onnx", 100, &hash), None);
-        let half = directory.path().join("half.onnx");
-        fs::write(&half, bytes).unwrap();
-        assert_eq!(verified_beside(&model, "half.onnx", 100, &hash), Some(half));
-        assert_eq!(
-            verified_beside(&model, "half.onnx", 100, MODEL_SHA256),
-            None
-        );
-        assert_eq!(verified_beside(&model, "half.onnx", 10, &hash), None);
+        assert!(verify_file(&path, 100, &hash).is_err());
+        fs::write(&path, bytes).unwrap();
+        verify_file(&path, 100, &hash).unwrap();
+        assert!(verify_file(&path, 100, MODEL_SHA256).is_err());
+        assert!(verify_file(&path, 10, &hash).is_err());
     }
 
     #[test]
     fn pinned_hashes_are_well_formed() {
-        for hash in [ARCHIVE_SHA256, MODEL_SHA256, HALF_MODEL_SHA256] {
+        let variants = VARIANT_FILES.iter().map(|file| file.sha256);
+        for hash in [ARCHIVE_SHA256, MODEL_SHA256].into_iter().chain(variants) {
             assert_eq!(hash.len(), 64);
             assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }

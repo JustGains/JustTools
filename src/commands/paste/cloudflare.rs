@@ -10,7 +10,7 @@ use std::{
 
 const API: &str = "https://api.cloudflare.com/client/v4";
 
-fn environment(name: &str) -> Option<String> {
+pub(super) fn environment(name: &str) -> Option<String> {
     // An explicit empty process value disables a persisted Windows value,
     // which also makes tests and unattended overrides deterministic.
     match std::env::var_os(name) {

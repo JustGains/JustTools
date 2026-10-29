@@ -44,6 +44,33 @@ fn keep_to_fast_cores() -> Option<Vec<usize>> {
     None
 }
 
+/// The cores this process may run on, when the caller narrowed them (taskset,
+/// or a cgroup cpuset such as a job runner's) and `fast_cores` did not pick
+/// them itself. ONNX Runtime otherwise starts one thread for every core of the
+/// machine and pins each one there: under a cpuset those pins fail and all the
+/// threads crowd onto the allowed cores (an Orange Pi cut-out took 19 s instead
+/// of 10), and under taskset they move onto cores the caller kept it off.
+pub fn allowed_cores() -> Option<&'static [usize]> {
+    static ALLOWED: OnceLock<Option<Vec<usize>>> = OnceLock::new();
+    ALLOWED.get_or_init(narrowed_cores).as_deref()
+}
+
+#[cfg(target_os = "linux")]
+fn narrowed_cores() -> Option<Vec<usize>> {
+    narrowed(linux::allowed_cpus()?, linux::online_cpus()?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn narrowed_cores() -> Option<Vec<usize>> {
+    None
+}
+
+/// The allowed cores when they are fewer than the machine's.
+#[cfg(any(target_os = "linux", test))]
+fn narrowed(allowed: Vec<usize>, online: usize) -> Option<Vec<usize>> {
+    (!allowed.is_empty() && allowed.len() < online).then_some(allowed)
+}
+
 /// The fast cores, when some cores are much slower: those with at least three
 /// quarters of the top capacity. Clusters of the same fast core can differ a
 /// little (an RK3588's Cortex-A76 pairs report 1003 and 1024), while its
@@ -103,6 +130,13 @@ mod linux {
         }
     }
 
+    /// Cores the kernel has online, whatever this process is allowed.
+    pub fn online_cpus() -> Option<usize> {
+        // SAFETY: sysconf only reads a system value.
+        let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        usize::try_from(count).ok().filter(|&count| count > 0)
+    }
+
     pub fn set_affinity(cpus: &[usize]) -> io::Result<()> {
         // SAFETY: cpu_set_t is plain data, filled here and read by the kernel.
         unsafe {
@@ -138,5 +172,13 @@ mod tests {
         let alike: Vec<(usize, u64)> = (0..8).map(|cpu| (cpu, 1024)).collect();
         assert_eq!(fastest(&alike), None);
         assert_eq!(fastest(&[]), None);
+    }
+
+    #[test]
+    fn counts_the_cores_a_caller_narrowed_it_to() {
+        // A job runner's cpuset of the RK3588's fast cores
+        assert_eq!(narrowed(vec![4, 5, 6, 7], 8), Some(vec![4, 5, 6, 7]));
+        assert_eq!(narrowed((0..8).collect(), 8), None);
+        assert_eq!(narrowed(vec![], 8), None);
     }
 }

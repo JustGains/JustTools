@@ -156,9 +156,16 @@ fn linux_snapshot(program: &str, types: &[u8]) -> Result<Snapshot, String> {
         "STRING",
     ] {
         if has(mime) {
-            return Ok(Snapshot::Text(
-                String::from_utf8_lossy(&read(mime)?).into_owned(),
-            ));
+            let text = String::from_utf8_lossy(&read(mime)?).into_owned();
+            if has("text/html") {
+                let html = String::from_utf8_lossy(&read("text/html")?)
+                    .trim()
+                    .to_owned();
+                if !html.is_empty() {
+                    return Ok(Snapshot::Html { html, text });
+                }
+            }
+            return Ok(Snapshot::Text(text));
         }
     }
     Ok(Snapshot::Unsupported)
@@ -192,7 +199,9 @@ if (result.kind === 'unsupported') {
 if (result.kind === 'unsupported') {
     var text = board.stringForType($('public.utf8-plain-text'));
     if (!text || !text.length) text = board.stringForType($('public.url'));
-    if (text) result = {kind: 'text', text: ObjC.unwrap(text)};
+    var html = board.stringForType($('public.html'));
+    if (text && html && html.length) result = {kind: 'html', text: ObjC.unwrap(text), html: ObjC.unwrap(html)};
+    else if (text) result = {kind: 'text', text: ObjC.unwrap(text)};
 }
 if (board.changeCount !== count) throw new Error('Clipboard changed before paste; copy it again');
 JSON.stringify(result);
@@ -207,6 +216,7 @@ fn macos_snapshot(bytes: &[u8]) -> Result<Snapshot, String> {
         Files { paths: Vec<PathBuf> },
         Image { format: String, data: String },
         Text { text: String },
+        Html { text: String, html: String },
         Unsupported,
     }
     match serde_json::from_slice(bytes).map_err(|e| format!("cannot read macOS clipboard: {e}"))? {
@@ -230,6 +240,7 @@ fn macos_snapshot(bytes: &[u8]) -> Result<Snapshot, String> {
             Ok(Snapshot::Image(bytes, format))
         }
         Payload::Text { text } => Ok(Snapshot::Text(text)),
+        Payload::Html { text, html } => Ok(Snapshot::Html { html, text }),
         Payload::Unsupported => Ok(Snapshot::Unsupported),
     }
 }

@@ -17,8 +17,8 @@
 | Optimize video | `justvideo` | 720p H.264 MP4, CRF 28, AAC 128 kb/s; `--resolution` 480p to 4k or source; `http(s)` URLs download with yt-dlp |
 | Extract/convert audio | `justaudio` | AAC-LC M4A, 160 kb/s, 48 kHz; `http(s)` URLs download with yt-dlp |
 | Create MP3 | `justmp3` | LAME VBR quality 2, 48 kHz; `http(s)` URLs download with yt-dlp |
-| Paste images, files, or links | `justpaste` | Clipboard images become PNG; files support optional copy filters; links download as-is or through yt-dlp; never overwrites |
-| Choose the best web image | `justoptimize` | Measure PNG/WebP/JPEG; preserve alpha; keep source |
+| Paste images, files, or links | `justpaste` | Clipboard images become PNG; files support optional copy filters; links download as-is or through yt-dlp; `--as` saves txt/md/html/json/png/jpg/webp/ocr/mp3/mp4; `--ai` saves an AI transform; never overwrites |
+| Choose the best web image | `justoptimize` | Measure PNG/WebP/JPEG; optimize SVG as SVG; preserve alpha; keep source |
 | Create WAV | `justwav` | Stereo 16-bit PCM, 48 kHz; `http(s)` URLs download with yt-dlp |
 | Work with JSON | `justjson` | Format, validate, query, or minify |
 | Work with PDF | `justpdf` | Inspect, merge, split, extract, rotate, compress, save images, or list unique links |
@@ -28,12 +28,12 @@
 | Inspect ports | `justport` | Show listener/process ownership; guarded kill is optional |
 | Show the public IP address | `justip` | Report the public IPv4 and IPv6 address together; `-4`/`-6` narrow it |
 | Browse development servers | `justports` | Live smart TUI, automatic saving, and one-key Launch Again recipes |
-| Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to `<name>-nobg.png`; Auto visibly falls back to CPU |
+| Remove backgrounds | `justrmbg` / `rmbg` | Local BRIA RMBG-2.0 inference to `<name>-nobg.png` (or a cropped WebP picture); Auto visibly falls back to CPU |
 | Archive files or folders | `justzip` | ZIP ordinary inputs recursively; Git folders honor ignore rules |
 | Create and enter a directory | `justmkcd` / `mkcd` | Create one directory; enter it through `just init` shell integration |
 | Claude permission-bypass shortcut | `claude_` | Shell function for `claude --dangerously-skip-permissions`, forwarding arguments |
 | Codex permission-bypass shortcut | `codex_` | Shell function for `codex --yolo`, forwarding arguments |
-| Windows right-click menu | `just context install` | Per-user File Explorer menu; `status` and `uninstall` manage it |
+| Windows right-click menu | `just context install` | Per-user File Explorer menu, added by `just install`; `status` and `uninstall` manage it |
 
 Every direct alias also works through short dispatch: `just resize`, `just pdf`,
 `just rmbg`, and so on.
@@ -171,6 +171,9 @@ Set `OPENROUTER_API_KEY` or pass `--api-key`. JustCommit reads
 working tree by default, checks that the index stayed unchanged, and keeps model
 input fixed-size even when hundreds of thousands of paths changed. `--staged`
 uses only the existing index. `--push` pushes only after the commit succeeds.
+Phase status, staged counts, digest size, model, and timeout go to stderr;
+terminals also show phase timings and five-second reminders during slow work.
+Redirected diagnostics omit timed reminders and ANSI animation.
 
 ## Resize examples
 
@@ -219,7 +222,11 @@ PNG, WebP, and eligible progressive JPEG outputs. Any non-opaque pixel excludes
 JPEG, while PNG and WebP retain alpha. The default keeps the source and writes
 `<name>-optimized.<best>` only when an encoded candidate is smaller than an
 already-web-ready original. `--output` keeps sources and writes `<name>.<best>`
-under that folder; `--replace` is the only source-removing mode.
+under that folder; `--replace` is the only source-removing mode. SVG inputs
+stay SVG: JustOptimize applies JustSVG's conservative preset (viewBox, IDs,
+title, description, namespaces, and accessibility attributes kept) and writes
+`<name>-optimized.svg` only when the result is smaller. `--quality` does not
+apply to SVG.
 
 ## Background removal examples
 
@@ -229,6 +236,8 @@ justrmbg portrait.jpg --download
 justrmbg --check
 justrmbg --check --gpu
 justrmbg portrait.jpg --provider cpu
+justrmbg pose.jpg --picture
+justrmbg photos --output cutouts --format webp --crop --padding 8
 justrmbg --serve
 ```
 
@@ -236,14 +245,24 @@ The default `auto` provider prefers acceleration. It reports when CPU supports
 model nodes the accelerator cannot execute, and visibly reports any full move to
 CPU. `--cpu` is strict CPU. `--gpu` is the strict platform GPU (DirectML on
 Windows, CoreML on macOS, and CUDA elsewhere), while `--provider` also accepts
-`auto`, `cpu`, `directml`, `cuda`, and `coreml`. Explicit GPU modes never fall
-back to CPU.
+`auto`, `cpu`, `directml`, `cuda`, `tensorrt`, and `coreml`. Explicit GPU modes
+never fall back to CPU. Each provider runs the fastest verified model file
+beside the managed model (`rmbg-2.0-fast-fp16.onnx` on DirectML and CUDA,
+`rmbg-2.0-fast.onnx` on TensorRT, `rmbg-2.0-cpu.onnx` on CPU, made by
+`scripts/rmbg/make_models.py`) and falls back to BRIA's export;
+`--full-precision` keeps float32 on GPUs. TensorRT builds its engine once (minutes);
+Auto uses it only after that.
+
+Output options: `--format png|webp`, `--crop`, `--padding PX`, `--max-width PX`,
+`--max-height PX`, `--quality N`, `--alpha-quality N`, `--method N`,
+`--compression fast|small`, and `--picture` (crop, 10 px padding, at most 400 px
+tall, WebP). Serve requests take the same options in camelCase.
 
 `--check` creates a provider session and runs tiny real inference without an
 image and without resolving or downloading the BRIA model. It proves provider
 operation, not strict compatibility of the full BRIA graph or physical-GPU use.
 Windows x64 can use
-the verified managed DirectML bundle. CUDA and CoreML require an absolute
+the verified managed DirectML bundle. CUDA, TensorRT and CoreML require an absolute
 `ORT_DYLIB_PATH` naming a compatible provider-enabled runtime; relative and
 PATH-only DLL lookup is rejected. A non-interactive run never downloads a
 missing runtime unless `--download` is explicit. The bare launcher visibly
@@ -257,13 +276,15 @@ nonzero if any file failed. It has no `--dry-run` or `--recursive`; use
 `--check` as runtime preflight and review explicit file/directory mappings.
 
 `justrmbg --serve` is for programs that keep the model loaded, not one-off
-edits. It prints `{"ready":true,"provider":...,"load_seconds":...}`, then
-answers each stdin line `{"id":"1","input":"in.jpg","output":"out.png"}` with
-one JSON line in order: `ok`, absolute `output`, `seconds` and `stages`, or
-`error`. Send requests without waiting for answers; the server decodes and
-saves other images while the model runs. The output folder must exist, inputs
-are never overwritten, and closing stdin exits 0. GPU runs use a verified
-`rmbg-2.0-fp16.onnx` beside the managed model when present. A model with a
+edits. It prints `{"ready":true,"provider":...,"model":...,"load_seconds":...,
+"pictures":true}`, then answers each stdin line
+`{"id":"1","input":"in.jpg","output":"out.png"}` (plus any output options, such
+as `"picture":true`) with one JSON line in order: `ok`, absolute `output`,
+`seconds`, `stages`, `width`, `height` and `bytes`, or `error`. Output options
+given with `--serve` are every request's defaults, and command-line batches run
+through the same stages. Send requests without waiting for answers; the server
+decodes and saves other images while the model runs. The output folder must
+exist, inputs are never overwritten, and closing stdin exits 0. A model with a
 fixed input size runs at that size; below 8 GB of memory CPU inference trades
 speed for memory, and on Linux CPUs with fast and slow cores justrmbg uses only
 the fast ones. See `docs/rmbg.md`.
@@ -301,7 +322,9 @@ just context uninstall
 ```
 
 Adds a per-user **JustTools** entry to File Explorer for all files and
-folders. Entries run built-in defaults in a console window that prints the
+folders. `just install` adds it on Windows unless `--no-context-menu` is passed
+or the user removed it with `just context uninstall`; a stalled Windows package
+registration falls back to "Show more options" after 60 seconds. Entries run built-in defaults in a console window that prints the
 Headless command; `…` entries open the launcher with the selection filled in.
 Any file, folder, mixed selection, or folder background offers JustZip with
 smallest (default), balanced, or fast compression, a non-writing preview, and
@@ -311,9 +334,19 @@ ignores; ordinary folders recurse, keeping empty directories. Existing ZIPs
 are replaced atomically; sources stay intact and conflicting names are rejected.
 More options fills in the whole selection with the same default destination.
 The top-level Windows 11 menu needs a signed `justtools-shell.msix` or Developer
-Mode; `--classic` registers under "Show more options". `just context run` is
+Mode; `--classic` registers under "Show more options". To repair an empty or
+missing menu, update `just.exe` and `justtools_shell.dll` together and run
+`just context install`; verify the applicable entries in both menu styles.
+`just context run` is
 the entry point Explorer uses and is not meant to be typed. See
 `docs/context-menu.md`.
+
+Tagged Windows releases require trusted signatures on `just.exe`, the DLL,
+and the MSIX identity, plus a passing Defender scan of those files and the ZIP.
+The `.defender.json` sidecar records hashes and intelligence versions. Branch
+artifacts may be unsigned. For a detection, preserve its details and submit
+the affected release for Microsoft review; do not add antivirus exclusions or
+disable protection. See `docs/windows-security.md`.
 
 ## ZIP archives
 
@@ -421,6 +454,38 @@ into multi-entry links, and `--dry-run` makes no request. Use `justvideo` or
 `justmp3` with a URL instead when the result should be converted. See
 `docs/paste.md`.
 
+### Paste as and AI paste
+
+```sh
+justpaste --clipboard --as md          # rich text keeps structure; also txt, html, json
+printf 'a,b\n1,2\n' | justpaste --as json
+justpaste --clipboard --as webp        # image formats: png, jpg (flattened on white), webp
+justpaste --clipboard --as ocr         # Windows OCR, local
+justpaste --as mp3 --copy talk.mov     # or mp4; links download then transcode
+justpaste --clipboard --ai "Summarize in 3 bullets" --ai-service anthropic --dry-run
+justpaste --clipboard --ai-action fix-spelling --ai-service openai --ai-model MODEL
+justpaste --clipboard --ai-action NAME --saved-settings
+```
+
+`--as` writes `Text|Image <date time>.<ext>` (OCR: `Image text …`) or the
+transcoded names, numbered when taken, and fails before writing when the
+clipboard does not fit. `--copy` with one image converts that file; media
+`--copy` sources are kept. AI services: `openai`, `azure` (needs
+`--ai-endpoint` and `--ai-deployment`, optional `--ai-api-version`), `mistral`,
+`gemini`, `ollama`, `foundry` (needs `--ai-endpoint`), `compatible` (any
+OpenAI-compatible URL), and `anthropic` (default model `claude-opus-5-5`);
+others need `--ai-model`. Keys come only from `OPENAI_API_KEY`,
+`AZURE_OPENAI_API_KEY`, `MISTRAL_API_KEY`, `GEMINI_API_KEY`,
+`ANTHROPIC_API_KEY`, or `JUSTPASTE_AI_API_KEY`. OpenAI text passes OpenAI
+moderation first unless `--no-ai-moderation`. Answers save as `.txt` unless
+`--as md|html|json`; `--dry-run` sends nothing. Saved custom actions
+(`Name: instruction` lines) need `--saved-settings`.
+
+On Windows, Smart Paste's Ctrl+V uses one saved choice per clipboard kind
+(text, image, links, audio/video files), and one picker shortcut
+(Ctrl+Shift+V by default, configurable or off) lists every fitting action.
+`--clipboard --saved-settings` follows the same saved Ctrl+V choices.
+
 ## Structured and document examples
 
 ### Windows Smart Paste and filtered copies
@@ -451,6 +516,8 @@ Click the JustPaste tray icon to open native settings, or right-click for
 grouped quick actions. Save changes validates custom exclusions and saves
 filters together; Cancel leaves them unchanged. Settings can open without
 the resident running. Sign-in startup is still an explicit choice.
+Tray settings do not request elevation or process breakaway; restricted Windows
+jobs can keep the settings child attached to the resident.
 `--enable` starts an independent resident that survives the launching terminal
 closing. A host that forbids process detachment produces a startup error; use
 the Explorer launcher there. Login startup remains a separate opt-in.
@@ -460,7 +527,9 @@ saved filename). Clipboard PNGs are validated and saved without re-encoding;
 The keyboard hook runs separately from tray/settings work, and repeat
 suppression never follows focus into another app or Explorer text field.
 Smart Paste takes over file copies only when a filter is enabled; cut/move and
-virtual files stay native. Explorer's built-in mouse Paste remains native;
+virtual files stay native. Ctrl+V reaches Explorer untouched unless the
+clipboard holds an image, text, or (filters on) copied files. Filtered copies
+use the system copy, several files at once, and keep modified times. Explorer's built-in mouse Paste remains native;
 use **JustPaste** in the right-click menu to apply the same filters.
 Long Smart Paste operations show a delayed progress window with stage, elapsed
 time, stream download progress, and Cancel. Closing it hides the window without

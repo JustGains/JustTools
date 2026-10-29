@@ -81,14 +81,19 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             };
             install(classic)
         }
-        Some(name @ ("uninstall" | "status" | "refresh")) => {
+        // `just install` passes --add so a first installation gets the menu.
+        Some("refresh") => match rest.as_slice() {
+            [] => refresh(false),
+            [flag] if flag == "--add" => refresh(true),
+            _ => Err(usage("context refresh accepts only --add")),
+        },
+        Some(name @ ("uninstall" | "status")) => {
             if !rest.is_empty() {
                 return Err(usage(format!("context {name} does not take arguments")));
             }
             match name {
                 "status" => status(),
-                "uninstall" => uninstall(),
-                _ => refresh(),
+                _ => uninstall(),
             }
         }
         Some(other) => Err(usage(format!("unknown context command: {other}"))),
@@ -229,17 +234,20 @@ fn status() -> ToolResult {
 }
 
 /// Re-register a menu that is already installed so it matches the build now
-/// on disk; a menu that was never installed stays absent. `just install` runs
-/// this after replacing the files.
+/// on disk. With `add`, a user with no menu gets one, unless they removed it
+/// with `just context uninstall`. `just install` runs this after replacing the
+/// files.
 #[cfg(windows)]
-fn refresh() -> ToolResult {
+fn refresh(add: bool) -> ToolResult {
     match register::ownership()? {
         None => {
-            if register::library_present() {
-                println!(
-                    "just: add the File Explorer right-click menu with `just context install`."
-                );
+            if !register::library_present() {
+                return Ok(());
             }
+            if add && !register::removed_by_user() {
+                return install(false);
+            }
+            println!("just: add the File Explorer right-click menu with `just context install`.");
             return Ok(());
         }
         // Another copy of JustTools registered the menu; it is not ours to move.
@@ -263,7 +271,7 @@ fn refresh() -> ToolResult {
 }
 
 #[cfg(not(windows))]
-fn refresh() -> ToolResult {
+fn refresh(_add: bool) -> ToolResult {
     Ok(())
 }
 

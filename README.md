@@ -40,6 +40,8 @@ justpaste https://github.com/owner/repo      # clone into a repo subfolder
 justpaste https://x.com/Cloudflare           # save the public profile photo
 justpaste --markdown https://example.com    # Cloudflare page as Markdown
 echo 'Save this text' | justpaste --text     # CLI text input on every platform
+justpaste --clipboard --as md               # paste as .md/.html/.json/.jpg/.webp, OCR, MP3/MP4
+justpaste --clipboard --ai "Summarize it"   # optional AI paste; keys only from the environment
 just paste --enable                        # Windows: Ctrl+V Smart Paste in Explorer
 justoptimize hero.png --dry-run
 justrmbg portrait.jpg
@@ -55,12 +57,12 @@ and one-run actions never persist. The bottom line always shows the exact
 | --- | --- |
 | Images | `justoptimize`, `justcrop`, `justjpg`, `justpng`, `justwebp`, `justavif`, `justresize`, `justrmbg` |
 | Audio and video | `justaudio`, `justmp3`, `justwav`, `justvideo` (also accept `http(s)` URLs) |
-| Paste / downloads | `justpaste` saves clipboard images, files, or links and clones Git repos; optional Explorer Ctrl+V mode and copy filters |
+| Paste / downloads | `justpaste` saves clipboard images, files, or links and clones Git repos; pastes as text, Markdown, HTML, JSON, JPEG/WebP, OCR text, MP3/MP4, or AI output; optional Explorer Ctrl+V mode, one picker shortcut, and copy filters |
 | Documents and data | `justjson`, `justpdf`, `justlinks`, `justsvg`, `justqr` |
 | Development | `justports`, `justport`, `justip`, `bunt`, `justcommit`, `justzip` |
 | Setup | `justready` |
 | Shell helpers | `mkcd`, `claude_`, `codex_` (automatic in Windows PowerShell) |
-| File Explorer | `just context install` adds a right-click menu on Windows |
+| File Explorer | Windows installs add a right-click menu; `just context` manages it |
 
 Use `<command> --help` for every option. Direct aliases also work as short
 dispatch, such as `just optimize`, `just ports`, and `just rmbg`.
@@ -100,8 +102,14 @@ Tray settings optionally filter file copies by `node_modules`, custom ignored
 names/relative paths, and `.gitignore`. Cut/move stays with Explorer. Start at
 login is optional; the listener survives closing its launching terminal.
 `just paste --disable` stops it. See [JustPaste](docs/paste.md).
+Ctrl+V uses a saved choice per clipboard kind (text, image, links, media
+files), and **Ctrl+Shift+V** opens a picker of every paste-as action that fits,
+including AI actions when enabled: one shortcut instead of one per format.
 Click its violet-and-blue tray icon, or run `just paste --settings`, for native
-Windows settings with copy filters and sign-in startup. Right-click for quick actions.
+Windows settings with paste choices, AI, copy filters, and sign-in startup.
+Tray settings open without administrator rights, including under restricted
+Windows process jobs.
+Right-click for quick actions.
 Long pastes show a small progress window with Cancel. yt-dlp is downloaded when
 needed and checked for updates every twelve hours, with earlier retries on failure.
 If Ctrl+V does not produce a file, `just paste --status` shows the last paste
@@ -109,9 +117,9 @@ decision and notification; `just paste --diagnose` checks Explorer connectivity
 without reading clipboard contents. Clipboard PNGs retain their original bytes,
 and Alt+V and pastes in other apps pass through.
 
-`just context install` adds **JustTools** to the File Explorer context menu for
-the current user. Right-click a video for JustVideo at 480p, 720p, 1080p,
-1440p, or 4K and JustMP3/JustAudio/JustWAV; an image for JustOptimize,
+The Windows install adds **JustTools** to the File Explorer context menu for
+the current user (`just context install` re-adds it after an uninstall). Right-click a video for JustVideo at 480p, 720p, 1080p,
+1440p, or 4K and JustMP3/JustAudio/JustWAV; an image or SVG for JustOptimize,
 JustResize sizes, WebP/AVIF/JPEG conversion, JustCrop, and JustRMBG; a PDF for
 JustPDF compression, splitting, images, and links; an SVG, JSON file, or
 document for the tools that read it; and a folder or its
@@ -122,7 +130,9 @@ ordinary folders include their contents recursively. Each entry opens a console
 showing its **Headless:** command, and sources are kept unless
 an entry says "in place". On Windows 11 the top-level menu needs a signed
 release package or Developer Mode; otherwise the menu sits under "Show more
-options". See the [context menu guide](docs/context-menu.md).
+options". Update `just.exe` and `justtools_shell.dll` together, then run
+`just context install` to repair an empty or missing menu. See the
+[context menu guide](docs/context-menu.md).
 
 ## Media downloads
 
@@ -148,13 +158,17 @@ anything runs.
 
 `justoptimize` encodes real PNG, WebP, and eligible JPEG candidates, preserves
 alpha when transparency is needed, and keeps the smallest useful web result.
+SVGs stay SVG and get JustSVG's conservative optimization.
 Use `--output` for copies or explicit `--replace` when replacement is intended.
 
 `justrmbg` automatically acquires its checksum-pinned ONNX Runtime and BRIA
 RMBG-2.0 model when launched interactively. Headless automation grants the same
 permission with `--download`; `justrmbg --check` tests the runtime first without
 downloading the model. Programs can keep the model loaded with
-`justrmbg --serve`, which answers JSON requests from stdin one per line; see the
+`justrmbg --serve`, which answers JSON requests from stdin one per line with the
+same output options as the command line (`--picture` for a cropped, padded,
+scaled WebP). Each provider runs the fastest verified model file beside the
+managed model: about 0.1 s a picture on DirectML, 0.04 s on TensorRT. See the
 [JustRMBG guide](docs/rmbg.md). BRIA's model weights require a separate license
 for commercial use.
 
@@ -171,6 +185,10 @@ For complete behavior, see the [console UI](docs/console-ui.md),
 [context menu](docs/context-menu.md), [JustZip](docs/zip.md), [JustPaste](docs/paste.md), [JustPDF](docs/pdf.md), [JustLinks](docs/links.md), [JustRMBG](docs/rmbg.md), [JustPorts](docs/ports.md), [JustIP](docs/ip.md),
 [bunt](docs/bunt.md), [JustCommit](docs/commit.md), [media downloads](docs/downloads.md), and
 [JustReady](docs/ready.md) guides.
+
+`justcommit` reports each phase, staged counts, digest size, and the AI request
+timeout on stderr. Terminals also show timings and five-second progress updates
+while staging, waiting for AI, running Git hooks, or pushing.
 
 ## Agent skill
 
@@ -195,13 +213,16 @@ cargo build --locked --release -p justtools
 ```
 
 On Windows, add `-p justtools-shell` to build the File Explorer extension that
-`just install` copies beside the executable.
+`just install` copies beside the executable and registers for the current user.
 
 Rust 1.90 is the minimum supported toolchain. Version tags build and publish
 checksummed archives for all six supported OS/architecture targets through
 [`native.yml`](.github/workflows/native.yml). Each archive includes the brief
 README, complete guides, screenshots, agent instructions, and installable skill;
 Windows archives also carry the File Explorer extension.
+Tagged Windows releases require trusted signatures on the executable, extension,
+and identity package, plus a passing Defender scan of the packaged files.
+See [Windows release verification](docs/windows-security.md).
 
 MIT licensed. Third-party notices ship in
 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).

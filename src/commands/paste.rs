@@ -20,19 +20,31 @@ use crate::deps;
 use crate::error::{ToolError, ToolResult};
 
 const TOOL: &str = "justpaste";
+mod actions;
+mod ai;
 mod clipboard;
 mod cloudflare;
+mod convert;
 mod copy;
 mod git;
+mod ocr;
 mod profile;
 #[cfg(windows)]
 mod windows;
+
+use actions::{Action, Format, OnPaste};
 
 #[derive(Clone, Debug, Default)]
 struct Settings {
     excludes: Vec<String>,
     gitignore: bool,
     text: bool,
+    /// What Ctrl+V and `--saved-settings` do with each kind of clipboard content.
+    paste: actions::Defaults,
+    picker: actions::Picker,
+    /// The AI service, present only when AI paste is enabled.
+    ai: Option<ai::Config>,
+    custom: Vec<ai::Custom>,
 }
 
 impl Settings {
@@ -42,13 +54,17 @@ impl Settings {
         if store.get(TOOL, "ignore_node_modules") == Some("true") {
             excludes.push("node_modules".into());
         }
+        let text = store.get(TOOL, "text") == Some("true");
         Ok(Self {
             excludes,
             gitignore: store.get(TOOL, "gitignore") == Some("true"),
-            text: store.get(TOOL, "text") == Some("true"),
+            text,
+            paste: actions::Defaults::load(&store, text),
+            picker: actions::Picker::load(&store),
+            ai: (store.get(TOOL, "ai") == Some("true")).then(|| ai::Config::load(&store)),
+            custom: ai::custom_actions(store.get(TOOL, "custom_actions").unwrap_or("")),
         })
     }
-    #[cfg(windows)]
     fn filters(&self) -> bool {
         self.gitignore || !self.excludes.is_empty()
     }
@@ -78,6 +94,12 @@ struct Options {
     settings: Settings,
     copies: Vec<PathBuf>,
     mode: LinkMode,
+    saved: bool,
+    format: Option<Format>,
+    /// `--ai PROMPT`, or `--ai-action NAME` resolved against saved custom actions.
+    ai_prompt: Option<String>,
+    ai_action: Option<String>,
+    ai: ai::Config,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -125,6 +147,21 @@ taken name becomes "name (2).ext" or "repo (2)". Failed or cancelled clones
 leave no partial checkout. Several links can be given, and --clipboard takes every link in
 the copied text.
 
+Paste as (Advanced Paste):
+      --as FORMAT     Save the clipboard, piped text, links, or --copy media as
+                      txt, md, html, json (text; rich text keeps its structure),
+                      png, jpg, webp (images), ocr (image text, Windows), or
+                      mp3, mp4 (transcode copied media or downloaded links)
+      --ai PROMPT     Transform copied or piped text with AI and save the answer
+      --ai-action NAME  Run a saved custom action (or fix-spelling) with AI
+      --ai-service ID   openai, azure, mistral, gemini, ollama, foundry,
+                        compatible (any OpenAI-compatible URL), or anthropic
+      --ai-model NAME, --ai-endpoint URL, --ai-deployment NAME,
+      --ai-api-version V, --ai-system-prompt TEXT, --no-ai-moderation
+  Keys come only from the environment: OPENAI_API_KEY, AZURE_OPENAI_API_KEY,
+  MISTRAL_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY, or JUSTPASTE_AI_API_KEY.
+  AI sends only the copied text and the instruction to that service.
+
 Options:
   -c, --clipboard     Use the links in the clipboard
       --copy PATH     Copy a file/folder (repeatable); combine with --dry-run
@@ -132,7 +169,7 @@ Options:
       --exclude NAMES Skip names/relative paths in copied trees (semicolon-separated)
       --ignore-node-modules  Skip node_modules in copied trees
       --respect-gitignore    Honor .gitignore and .git/info/exclude when copying
-      --saved-settings      Explicitly use saved copy filters and text setting
+      --saved-settings      Use saved copy filters, Ctrl+V paste-as defaults, and AI settings
   -o, --output DIR    Save into DIR instead of the current folder
       --playlist      Download every entry when a link is a playlist
       --markdown      Save a page as Markdown through Cloudflare Browser Run
@@ -152,8 +189,10 @@ Windows-only Explorer Smart Paste controls:
   --settings         Open the native Windows settings window
   --diagnose         Inspect Explorer focus and shell connectivity (no clipboard data)
   --startup on|off    Set current-user login startup
-Tray settings and the bare launcher save copy filters. Explicit headless paste
-uses only supplied flags. Filters do not affect Explorer cut/move operations.
+Ctrl+V uses one saved paste-as choice per clipboard kind; one picker shortcut
+(Ctrl+Shift+V by default) lists every action that fits. Tray settings and the
+bare launcher save these choices and copy filters. Explicit headless paste uses
+only supplied flags. Filters do not affect Explorer cut/move operations.
 
 Page links need yt-dlp and FFmpeg, which are downloaded automatically when
 missing; direct file links need nothing. yt-dlp is updated whenever twelve
@@ -180,7 +219,18 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
         },
         copies: Vec::new(),
         mode: LinkMode::Auto,
+        saved: false,
+        format: None,
+        ai_prompt: None,
+        ai_action: None,
+        ai: ai::Config::default(),
     };
+    if args.iter().any(|arg| arg == "--saved-settings") {
+        options.saved = true;
+        if let Some(config) = &options.settings.ai {
+            options.ai = config.clone();
+        }
+    }
     let mut index = 0;
     while index < args.len() {
         let argument = common::os_to_string(TOOL, &args[index], "argument")?;
@@ -207,6 +257,61 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
                 options.mode = LinkMode::ProfilePhoto;
             }
             "--saved-settings" => {}
+            "--as" => {
+                let value = common::option_value(TOOL, &args, &mut index, "--as")?;
+                options.format = Some(Format::parse(&value).ok_or_else(|| {
+                    ToolError::usage(
+                        TOOL,
+                        format!(
+                            "--as expects txt, md, html, json, png, jpg, webp, ocr, mp3, or mp4, not {value}"
+                        ),
+                    )
+                })?);
+            }
+            "--ai" => {
+                let value = common::option_value(TOOL, &args, &mut index, "--ai")?;
+                if value.trim().is_empty() {
+                    return Err(ToolError::usage(TOOL, "--ai needs an instruction"));
+                }
+                options.ai_prompt = Some(value);
+            }
+            "--ai-action" => {
+                options.ai_action = Some(common::option_value(
+                    TOOL,
+                    &args,
+                    &mut index,
+                    "--ai-action",
+                )?);
+            }
+            "--ai-service" => {
+                let value = common::option_value(TOOL, &args, &mut index, "--ai-service")?;
+                options.ai.service = ai::Service::parse(&value).ok_or_else(|| {
+                    ToolError::usage(
+                        TOOL,
+                        "--ai-service expects openai, azure, mistral, gemini, ollama, foundry, compatible, or anthropic",
+                    )
+                })?;
+            }
+            "--ai-model" => {
+                options.ai.model = common::option_value(TOOL, &args, &mut index, "--ai-model")?
+            }
+            "--ai-endpoint" => {
+                options.ai.endpoint =
+                    common::option_value(TOOL, &args, &mut index, "--ai-endpoint")?
+            }
+            "--ai-deployment" => {
+                options.ai.deployment =
+                    common::option_value(TOOL, &args, &mut index, "--ai-deployment")?
+            }
+            "--ai-api-version" => {
+                options.ai.api_version =
+                    common::option_value(TOOL, &args, &mut index, "--ai-api-version")?
+            }
+            "--ai-system-prompt" => {
+                options.ai.system_prompt =
+                    common::option_value(TOOL, &args, &mut index, "--ai-system-prompt")?
+            }
+            "--no-ai-moderation" => options.ai.moderation = false,
             "--copy" => {
                 index += 1;
                 let value = args
@@ -769,9 +874,14 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         ));
     }
     common::init_signals();
-    let options = parse(args)?;
+    let mut options = parse(args)?;
     if options.help {
         help();
+        return Ok(());
+    }
+    if options.format.is_some() || options.ai_prompt.is_some() || options.ai_action.is_some() {
+        let result = special(options)?;
+        println!("{TOOL}: {result}");
         return Ok(());
     }
     if !options.copies.is_empty() {
@@ -808,9 +918,27 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     }
     if options.clipboard {
         let snapshot = clipboard::read().map_err(|message| ToolError::new(TOOL, message))?;
-        let text = match snapshot {
-            clipboard::Snapshot::Text(text) if !links(&text).is_empty() => text,
-            snapshot => {
+        if options.saved && urls.is_empty() {
+            // The Explorer action follows the same saved defaults as Ctrl+V.
+            match options
+                .settings
+                .paste
+                .choose(&snapshot, options.settings.filters())
+            {
+                OnPaste::Act(Action::As(format)) => {
+                    let output = options.output.clone().unwrap_or_else(|| PathBuf::from("."));
+                    let result = actions::paste_as(format, snapshot, &output, options.dry_run)
+                        .map_err(|e| ToolError::new(TOOL, e))?;
+                    println!("{TOOL}: {result}");
+                    return Ok(());
+                }
+                OnPaste::Act(Action::PageMarkdown) => options.mode = LinkMode::Markdown,
+                _ => {}
+            }
+        }
+        let text = match snapshot.text() {
+            Some(text) if !links(text).is_empty() => text.to_owned(),
+            _ => {
                 if !urls.is_empty() {
                     return Err(ToolError::usage(
                         TOOL,
@@ -979,6 +1107,123 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     }
 }
 
+/// `--as` and `--ai`: one paste of the clipboard, piped text, links, or copies.
+fn special(options: Options) -> ToolResult<String> {
+    let error = |e: String| ToolError::new(TOOL, e);
+    let ai_requested = options.ai_prompt.is_some() || options.ai_action.is_some();
+    if options.ai_prompt.is_some() && options.ai_action.is_some() {
+        return Err(ToolError::usage(TOOL, "use either --ai or --ai-action"));
+    }
+    if options.mode != LinkMode::Auto || options.playlist {
+        return Err(ToolError::usage(
+            TOOL,
+            "--as and --ai cannot be combined with --markdown, --profile-photo, or --playlist",
+        ));
+    }
+    if ai_requested
+        && options
+            .format
+            .is_some_and(|f| !matches!(f, Format::Txt | Format::Md | Format::Html | Format::Json))
+    {
+        return Err(ToolError::usage(
+            TOOL,
+            "with --ai, --as only picks the answer's extension: txt, md, html, or json",
+        ));
+    }
+    let sources = usize::from(options.clipboard)
+        + usize::from(!options.inputs.is_empty())
+        + usize::from(!options.copies.is_empty());
+    if sources > 1 {
+        return Err(ToolError::usage(
+            TOOL,
+            "use one source: --clipboard, links, --copy, or piped text",
+        ));
+    }
+    let snapshot = if options.clipboard {
+        clipboard::read().map_err(error)?
+    } else if !options.inputs.is_empty() {
+        if options.inputs.iter().any(|input| links(input).is_empty()) {
+            return Err(ToolError::usage(
+                TOOL,
+                "every input must be an http(s) link",
+            ));
+        }
+        clipboard::Snapshot::Text(options.inputs.join("\n"))
+    } else if let ([path], Some(Format::Png | Format::Jpg | Format::Webp | Format::Ocr)) =
+        (options.copies.as_slice(), options.format)
+    {
+        // One image file converts like a copied image; the source is only read.
+        let format = image::ImageFormat::from_path(path).map_err(|_| {
+            ToolError::usage(TOOL, format!("{} is not a supported image", path.display()))
+        })?;
+        let bytes = fs::read(path)
+            .map_err(|e| ToolError::new(TOOL, format!("cannot read {}: {e}", path.display())))?;
+        clipboard::Snapshot::Image(bytes, format)
+    } else if !options.copies.is_empty() {
+        clipboard::Snapshot::Files {
+            paths: options.copies.clone(),
+            cut: false,
+        }
+    } else if !common::stdin_is_terminal() {
+        clipboard::Snapshot::Text(common::read_stdin()?)
+    } else {
+        return Err(ToolError::usage(
+            TOOL,
+            "use --clipboard, give links or --copy PATH, or pipe text",
+        ));
+    };
+    let output = options.output.clone().unwrap_or_else(|| PathBuf::from("."));
+    if !ai_requested {
+        let format = options
+            .format
+            .expect("special is only called for --as or --ai");
+        return actions::paste_as(format, snapshot, &output, options.dry_run).map_err(error);
+    }
+    let (name, prompt) = match (&options.ai_prompt, &options.ai_action) {
+        (Some(prompt), _) => ("AI paste".to_owned(), prompt.clone()),
+        (None, Some(action))
+            if matches!(
+                action.to_ascii_lowercase().as_str(),
+                "fix-spelling" | "fix spelling and grammar"
+            ) =>
+        {
+            (
+                ai::FIX_SPELLING.to_owned(),
+                ai::FIX_SPELLING_PROMPT.to_owned(),
+            )
+        }
+        (None, Some(action)) => {
+            let custom = options
+                .settings
+                .custom
+                .iter()
+                .find(|custom| custom.name.eq_ignore_ascii_case(action))
+                .ok_or_else(|| {
+                    ToolError::usage(
+                        TOOL,
+                        if options.saved {
+                            format!("no saved custom action is named {action}")
+                        } else {
+                            format!("custom actions are saved settings; add --saved-settings to run {action}")
+                        },
+                    )
+                })?;
+            (custom.name.clone(), custom.prompt.clone())
+        }
+        (None, None) => unreachable!("AI was requested"),
+    };
+    actions::paste_ai(
+        &options.ai,
+        &name,
+        &prompt,
+        &snapshot,
+        &output,
+        options.format.unwrap_or(Format::Txt),
+        options.dry_run,
+    )
+    .map_err(error)
+}
+
 fn save_snapshot(
     snapshot: clipboard::Snapshot,
     directory: &Path,
@@ -1058,7 +1303,9 @@ fn save_snapshot(
                 image.height()
             ))
         }
-        clipboard::Snapshot::Text(text) if settings.text => {
+        clipboard::Snapshot::Html { text, .. } | clipboard::Snapshot::Text(text)
+            if settings.text =>
+        {
             let name = format!(
                 "Text {}.txt",
                 chrono::Local::now().format("%Y-%m-%d %H-%M-%S")
@@ -1093,8 +1340,9 @@ fn smart_paste(
     snapshot: clipboard::Snapshot,
     directory: &Path,
     settings: &Settings,
+    mode: LinkMode,
 ) -> Result<String, String> {
-    if let clipboard::Snapshot::Text(text) = &snapshot {
+    if let Some(text) = snapshot.text() {
         let urls = links(text);
         if !urls.is_empty() {
             let mut downloader = Downloader { resolved: None };
@@ -1115,7 +1363,7 @@ fn smart_paste(
                     &url,
                     false,
                     directory,
-                    LinkMode::Auto,
+                    mode,
                 )? {
                     match result {
                         Pasted::File(..) => saved += 1,

@@ -46,6 +46,16 @@ existing staged selection. Default dry runs also stage the complete working
 tree; use `justcommit --staged --dry-run` when the index must remain unchanged.
 `--dry-run` prevents both the commit and push.
 
+Both launcher and headless runs report each phase on stderr: repository lookup,
+staging, staged file/status counts, index snapshot, commit instructions, patch
+sampling, digest size, OpenRouter request, index verification, commit, and push.
+The request status shows the model and timeout without exposing the API key or
+patch contents. A terminal also shows phase timings and a reminder every five
+seconds while a phase is still running, including Git hooks and network waits.
+Redirected stderr keeps plain phase messages without timed reminders or ANSI
+animation. Summaries and commit messages remain on stdout; Git keeps its normal
+stdout and stderr output.
+
 With `--push`, JustCommit runs a plain `git push` only after the commit succeeds.
 It uses the repository's normal remote, branch, and upstream configuration. If
 the push fails, the error identifies the commit that remains safely available

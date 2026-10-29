@@ -6,9 +6,47 @@ mod unix;
 #[derive(Debug)]
 pub enum Snapshot {
     Text(String),
+    /// Rich text: the clipboard's HTML fragment beside its plain-text form.
+    Html {
+        html: String,
+        text: String,
+    },
     Image(Vec<u8>, image::ImageFormat),
-    Files { paths: Vec<PathBuf>, cut: bool },
+    Files {
+        paths: Vec<PathBuf>,
+        cut: bool,
+    },
     Unsupported,
+}
+
+impl Snapshot {
+    /// The plain text a text or rich-text clipboard holds.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Snapshot::Text(text) | Snapshot::Html { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+}
+
+/// The fragment inside Windows' `HTML Format`, whose header gives byte offsets.
+#[cfg(any(windows, test))]
+pub(super) fn html_fragment(raw: &[u8]) -> Option<String> {
+    let raw = raw.split(|byte| *byte == 0).next().unwrap_or(raw);
+    let header = String::from_utf8_lossy(&raw[..raw.len().min(1024)]);
+    let offset = |key: &str| -> Option<usize> {
+        header
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+    };
+    let (start, end) = match (offset("StartFragment:"), offset("EndFragment:")) {
+        (Some(start), Some(end)) => (start, end),
+        _ => (offset("StartHTML:")?, offset("EndHTML:")?),
+    };
+    let fragment = raw.get(start..end.min(raw.len()))?;
+    let html = String::from_utf8_lossy(fragment).trim().to_owned();
+    (!html.is_empty()).then_some(html)
 }
 
 #[cfg(windows)]
@@ -115,7 +153,11 @@ pub fn read() -> Result<Snapshot, String> {
                 .map(|b| u16::from_le_bytes([b[0], b[1]]))
                 .take_while(|unit| *unit != 0)
                 .collect();
-            return Ok(Snapshot::Text(String::from_utf16_lossy(&units)));
+            let text = String::from_utf16_lossy(&units);
+            if let Some(html) = bytes(format("HTML Format")).and_then(|raw| html_fragment(&raw)) {
+                return Ok(Snapshot::Html { html, text });
+            }
+            return Ok(Snapshot::Text(text));
         }
     }
     Ok(Snapshot::Unsupported)
@@ -188,5 +230,28 @@ mod tests {
             .to_rgba8();
         assert_eq!(decoded.get_pixel(0, 0).0, [10, 20, 30, 255]);
         assert!(dib_to_bmp(&[0; 4]).is_err());
+    }
+
+    #[test]
+    fn html_format_yields_only_its_fragment() {
+        let body =
+            "<html><body><!--StartFragment--><b>Bold</b> café<!--EndFragment--></body></html>";
+        let header = |start: usize, end: usize, html: usize| {
+            format!(
+                "Version:0.9\r\nStartHTML:{html:010}\r\nEndHTML:{:010}\r\nStartFragment:{start:010}\r\nEndFragment:{end:010}\r\n",
+                html + body.len()
+            )
+        };
+        let length = header(0, 0, 0).len();
+        let raw = format!(
+            "{}{body}\0",
+            header(
+                length + body.find("<b>").unwrap(),
+                length + body.find("<!--EndFragment").unwrap(),
+                length
+            )
+        );
+        assert_eq!(html_fragment(raw.as_bytes()).unwrap(), "<b>Bold</b> café");
+        assert!(html_fragment(b"Version:0.9\r\n").is_none());
     }
 }

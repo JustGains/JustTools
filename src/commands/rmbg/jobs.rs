@@ -19,15 +19,17 @@ pub struct JobSet {
     pub batch_mode: bool,
 }
 
-pub fn default_output(input: &Path) -> PathBuf {
+/// `extension` is the output format's (`png` or `webp`).
+pub fn default_output(input: &Path, extension: &str) -> PathBuf {
     let stem = input
         .file_stem()
         .unwrap_or(input.as_os_str())
         .to_string_lossy();
-    input.with_file_name(format!("{stem}-nobg.png"))
+    input.with_file_name(format!("{stem}-nobg.{extension}"))
 }
 
-pub fn prepare(inputs: &[PathBuf], output: Option<&Path>) -> ToolResult<JobSet> {
+/// Maps inputs to outputs; outputs it names itself get `extension`.
+pub fn prepare(inputs: &[PathBuf], output: Option<&Path>, extension: &str) -> ToolResult<JobSet> {
     for input in inputs {
         if !input.exists() {
             return Err(ToolError::new(
@@ -100,7 +102,7 @@ pub fn prepare(inputs: &[PathBuf], output: Option<&Path>) -> ToolResult<JobSet> 
                     .into_owned();
                 Job {
                     input,
-                    output: output_dir.join(format!("{stem}.png")),
+                    output: output_dir.join(format!("{stem}.{extension}")),
                 }
             })
             .collect()
@@ -113,11 +115,11 @@ pub fn prepare(inputs: &[PathBuf], output: Option<&Path>) -> ToolResult<JobSet> 
                         .file_stem()
                         .unwrap_or(input.as_os_str())
                         .to_string_lossy();
-                    directory.join(format!("{stem}-nobg.png"))
+                    directory.join(format!("{stem}-nobg.{extension}"))
                 } else {
                     output
                         .map(Path::to_path_buf)
-                        .unwrap_or_else(|| default_output(input))
+                        .unwrap_or_else(|| default_output(input, extension))
                 };
                 Job {
                     input: input.clone(),
@@ -202,7 +204,7 @@ mod tests {
     #[test]
     fn derives_default_name() {
         assert_eq!(
-            default_output(Path::new("somewhere/photo.jpeg")),
+            default_output(Path::new("somewhere/photo.jpeg"), "png"),
             PathBuf::from("somewhere/photo-nobg.png")
         );
     }
@@ -225,7 +227,7 @@ mod tests {
         )
         .unwrap();
         let output = directory.path().join("new/output");
-        let jobs = prepare(&[directory.path().to_path_buf()], Some(&output)).unwrap();
+        let jobs = prepare(&[directory.path().to_path_buf()], Some(&output), "png").unwrap();
         assert!(jobs.batch_mode);
         assert!(!output.exists());
     }
@@ -239,7 +241,7 @@ mod tests {
         fs::write(&second, b"second").unwrap();
         let output = directory.path().join("results");
 
-        let jobs = prepare(&[first.clone(), second.clone()], Some(&output)).unwrap();
+        let jobs = prepare(&[first.clone(), second.clone()], Some(&output), "png").unwrap();
 
         assert!(jobs.batch_mode);
         assert_eq!(
@@ -264,7 +266,7 @@ mod tests {
         let missing = directory.path().join("missing.jpg");
         let output = directory.path().join("results");
 
-        let error = prepare(&[missing], Some(&output)).unwrap_err();
+        let error = prepare(&[missing], Some(&output), "png").unwrap_err();
 
         assert!(error.message().contains("input not found"));
         assert!(!output.exists());
@@ -277,11 +279,12 @@ mod tests {
         fs::write(directory.path().join("photo.png"), b"decoded later").unwrap();
         let output = directory.path().join("results");
 
-        let jobs = prepare(&[directory.path().to_path_buf()], Some(&output)).unwrap();
+        let jobs = prepare(&[directory.path().to_path_buf()], Some(&output), "png").unwrap();
         assert_eq!(jobs.jobs.len(), 1);
         assert!(jobs.jobs[0].input.ends_with("photo.png"));
 
-        let error = prepare(&[directory.path().join("notes.txt")], Some(&output)).unwrap_err();
+        let error =
+            prepare(&[directory.path().join("notes.txt")], Some(&output), "png").unwrap_err();
         assert!(error.message().contains("unsupported image"));
     }
 }

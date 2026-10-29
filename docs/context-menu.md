@@ -1,7 +1,8 @@
 # File Explorer context menu (Windows)
 
-JustTools can add itself to the right-click menu in File Explorer. All files
-and folders offer JustZip; other tools appear when they apply to the selection.
+JustTools adds itself to the right-click menu in File Explorer when it is
+installed on Windows. All files and folders offer JustZip; other tools appear
+when they apply to the selection.
 
 ```powershell
 just context install     # add the menu for the current user
@@ -10,6 +11,10 @@ just context uninstall   # remove everything install added
 ```
 
 No elevation is needed and nothing outside the current user is changed.
+The installer and `just install` add the menu automatically; pass
+`just install --no-context-menu` to skip it. A menu removed with
+`just context uninstall` stays removed through later upgrades until
+`just context install` adds it back.
 
 ![JustTools context-menu icons on dark and light menus](images/context-menu-icons.png)
 
@@ -21,7 +26,7 @@ No elevation is needed and nothing outside the current user is changed.
 | Audio (`.mp3 .wav .flac .m4a .ogg` …) | **JustMP3**, **JustAudio**, **JustWAV**, minus the format the file already has |
 | Image (`.jpg .png .webp .bmp .tif .qoi`) | **JustOptimize**; **JustResize** to fit 1024, 1920, 2560, or 3840 px, plus more options…; **JustWebP**, **JustAVIF**, **JustJPG**, **JustPNG**; **JustCrop**, **JustRMBG** |
 | PDF | **JustPDF** merge (two or more), compress, compress smallest, split into pages, save embedded images, save links, show details, more options…; **JustLinks** |
-| SVG / JSON | **JustSVG**; **JustJSON** format, minify, validate |
+| SVG / JSON | **JustOptimize** and **JustSVG** for SVG; **JustJSON** format, minify, validate |
 | Office, Markdown, HTML, text, CSV | **JustLinks** to `links.txt` or `links.csv` |
 | Folder, or a folder's empty background | **JustPaste** saves clipboard images, copies files with saved filters, or downloads links into that folder; JustOptimize, JustResize, JustWebP, JustVideo, JustMP3, and JustLinks launchers opened in that folder |
 | Any file, folder, mixed selection, or a folder's empty background | **JustZip**: smallest ZIP (default), balanced ZIP, fast ZIP, preview included files, more options… |
@@ -69,7 +74,7 @@ the clicked folder, independent of the launcher's saved output folder.
 | --- | --- | --- |
 | JustVideo · 1080p | `justvideo --resolution 1080p` | `<name>-web.mp4`, never upscaled, source kept |
 | JustMP3 / JustAudio / JustWAV | `justmp3`, `justaudio`, `justwav` | `<name>.mp3` / `.m4a` / `.wav`, source kept |
-| JustOptimize | `justoptimize` | `<name>-optimized.<best>`, source kept |
+| JustOptimize | `justoptimize` | `<name>-optimized.<best>` (SVG stays `.svg`), source kept |
 | JustResize · fit 2560 px | `justresize --max 2560` | `<name>-resized.<same>`, source kept |
 | JustWebP / JustAVIF | `justwebp --output .`, `justavif --output .` | `<name>.webp` / `.avif` beside the source, **source kept** |
 | JustJPG | `justjpg` | `<name>-optimized.jpg`, source kept |
@@ -114,6 +119,18 @@ Windows 11 only lets an app with a package identity into its top-level menu.
 registration is active at a time. `just install` refreshes a menu that the
 installed copy registered, and leaves a menu registered by another copy alone.
 
+If JustTools appears but its flyout is empty, update both `just.exe` and
+`justtools_shell.dll` from the same build, then run `just context install`.
+The extension handles the selection callbacks used by both the Windows 11
+menu and "Show more options"; opening either flyout shows the applicable tools.
+Explorer can cache a previous registration in an already-open window. Close
+and reopen that Explorer window before testing the repaired menu.
+
+Windows normally registers the package in a few seconds. If its app deployment
+service stalls, JustTools stops waiting after 60 seconds, registers the classic
+menu instead, and says so. Restarting Windows clears a stuck deployment; run
+`just context install` afterwards for the top-level menu.
+
 The menu is served by `justtools_shell.dll`, which ships in the Windows release
 archives and is copied beside `just.exe` by `just install`. When building from
 source, build it too:
@@ -121,13 +138,14 @@ source, build it too:
 ```sh
 cargo build --locked --release -p justtools -p justtools-shell
 ./target/release/just install
-just context install
 ```
 
-Release signing is optional. When the release workflow is given the
+Tagged Windows releases require the
 `JUSTTOOLS_SIGNING_PFX` (base64 PFX) and `JUSTTOOLS_SIGNING_PASSWORD` secrets,
-it packs and signs `justtools-shell.msix` into the Windows archives; the
-certificate must chain to a root the user's machine trusts.
+which sign and timestamp the executable, DLL, and `justtools-shell.msix` in the
+Windows archives; the certificate must chain to a root the user's machine
+trusts. Branch builds can be unsigned. A current Defender scan of the payload
+and ZIP must also pass. See [Windows release verification](windows-security.md).
 
 ## How it is built
 

@@ -7,6 +7,7 @@ use std::time::Instant;
 use image::codecs::png::{CompressionType, FilterType as PngFilterType, PngEncoder};
 use image::{DynamicImage, ImageEncoder, ImageFormat};
 use jpeg_encoder::{ChromaSubsamplingMethod, ColorType, Encoder, SamplingFactor};
+use justtools_core::svg;
 use rayon::prelude::*;
 
 use crate::common::{self, CollectedPaths, InputOptions, Plan};
@@ -17,7 +18,7 @@ use super::image_ops;
 const TOOL: &str = "justoptimize";
 const DEFAULT_QUALITY: u8 = 82;
 
-const HELP: &str = r#"justoptimize — Choose the smallest web-ready PNG, WebP, or JPEG.
+const HELP: &str = r#"justoptimize — Choose the smallest web-ready PNG, WebP, JPEG, or SVG.
 
 Usage:
   justoptimize [options] [file-or-folder ...]
@@ -27,9 +28,13 @@ the image is fully opaque—progressive JPEG. The smallest valid result wins.
 Images with any transparent pixel are never written as JPEG; PNG and WebP both
 preserve their alpha channel.
 
+SVG files stay SVG: they are optimized with JustSVG's conservative preset,
+which keeps viewBox, IDs, title, description, namespaces, and accessibility
+attributes. --quality does not apply to SVG.
+
 By default, sources are kept and a smaller result is written beside each source
-as <name>-optimized.<chosen-format>. If the original PNG/WebP/JPEG is already
-smallest, it is kept and no duplicate is written.
+as <name>-optimized.<chosen-format>. If the original PNG/WebP/JPEG/SVG is
+already smallest, it is kept and no duplicate is written.
 
 Options:
   -q, --quality N   JPEG/WebP visual quality, 1-100 (default: 82)
@@ -63,6 +68,7 @@ enum WebFormat {
     Png,
     Webp,
     Jpeg,
+    Svg,
 }
 
 impl WebFormat {
@@ -71,6 +77,7 @@ impl WebFormat {
             Self::Png => "png",
             Self::Webp => "webp",
             Self::Jpeg => "jpg",
+            Self::Svg => "svg",
         }
     }
 
@@ -79,14 +86,16 @@ impl WebFormat {
             Self::Png => "PNG",
             Self::Webp => "WebP",
             Self::Jpeg => "JPEG",
+            Self::Svg => "SVG",
         }
     }
 
-    fn image_format(self) -> ImageFormat {
+    fn image_format(self) -> Option<ImageFormat> {
         match self {
-            Self::Png => ImageFormat::Png,
-            Self::Webp => ImageFormat::WebP,
-            Self::Jpeg => ImageFormat::Jpeg,
+            Self::Png => Some(ImageFormat::Png),
+            Self::Webp => Some(ImageFormat::WebP),
+            Self::Jpeg => Some(ImageFormat::Jpeg),
+            Self::Svg => None,
         }
     }
 
@@ -95,6 +104,7 @@ impl WebFormat {
             ".png" => Some(Self::Png),
             ".webp" => Some(Self::Webp),
             ".jpg" | ".jpeg" => Some(Self::Jpeg),
+            ".svg" => Some(Self::Svg),
             _ => None,
         }
     }
@@ -125,7 +135,8 @@ struct Candidate {
 struct Evaluation {
     source: PathBuf,
     before: u64,
-    dimensions: (u32, u32),
+    /// Pixel size of a raster source; `None` for SVG.
+    dimensions: Option<(u32, u32)>,
     transparent: bool,
     winner: Candidate,
 }
@@ -247,12 +258,17 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
     Ok(options)
 }
 
+fn is_svg(path: &Path) -> bool {
+    WebFormat::from_path(path) == Some(WebFormat::Svg)
+}
+
 fn collect(options: &Options, inputs: &[OsString]) -> ToolResult<CollectedPaths> {
+    let extensions = [image_ops::STILL_EXTENSIONS, &[".svg"]].concat();
     let collected = common::collect_paths(
         TOOL,
         inputs,
         &InputOptions {
-            extensions: image_ops::STILL_EXTENSIONS,
+            extensions: &extensions,
             recursive: options.recursive,
             exclude_directory: options.output.as_deref(),
         },
@@ -371,6 +387,7 @@ fn encoded_candidate(
         WebFormat::Png => encode_png(image, transparent, &path),
         WebFormat::Webp => encode_webp(image, transparent, quality, &path),
         WebFormat::Jpeg => encode_jpeg(image, quality, &path),
+        WebFormat::Svg => Err("raster images are never traced to SVG".into()),
     };
     if let Err(error) = result {
         fs::remove_file(&path).ok();
@@ -379,7 +396,7 @@ fn encoded_candidate(
     let bytes = image_ops::validate_encoded_image(
         &path,
         (image.width(), image.height()),
-        Some(format.image_format()),
+        format.image_format(),
     )?;
     Ok(Candidate {
         format,
@@ -388,12 +405,44 @@ fn encoded_candidate(
     })
 }
 
+fn evaluate_svg(source: &Path) -> Result<Evaluation, String> {
+    let original = fs::read_to_string(source).map_err(|error| error.to_string())?;
+    let before = original.len() as u64;
+    let optimized = svg::optimize_svg(&original, "SVG", svg::DEFAULT_PRECISION, true)
+        .map_err(|error| format!("{error:#}"))?;
+    let after = optimized.len() as u64;
+    let file = if after < before {
+        let path = candidate_path(WebFormat::Svg)?;
+        if let Err(error) = fs::write(&path, &optimized) {
+            fs::remove_file(&path).ok();
+            return Err(format!("SVG write failed: {error}"));
+        }
+        CandidateFile::Temporary(path)
+    } else {
+        CandidateFile::Original
+    };
+    Ok(Evaluation {
+        source: source.to_path_buf(),
+        before,
+        dimensions: None,
+        transparent: false,
+        winner: Candidate {
+            format: WebFormat::Svg,
+            bytes: after.min(before),
+            file,
+        },
+    })
+}
+
 fn evaluate(source: &Path, quality: u8) -> Result<Evaluation, String> {
+    if is_svg(source) {
+        return evaluate_svg(source);
+    }
     let before = fs::metadata(source)
         .map_err(|error| error.to_string())?
         .len();
     let image = image_ops::load_oriented(source)?;
-    let dimensions = (image.width(), image.height());
+    let dimensions = Some((image.width(), image.height()));
     let transparent = has_transparency(&image);
     let mut candidates = vec![
         encoded_candidate(&image, WebFormat::Png, transparent, quality)?,
@@ -485,13 +534,15 @@ fn print_choice(prepared: &Prepared, dry_run: bool) {
     } else {
         "; source kept"
     };
+    let dimensions = evaluation
+        .dimensions
+        .map(|(width, height)| format!(" {width}x{height}"))
+        .unwrap_or_default();
     println!(
-        "  {action:<7} {} -> {} — {} {}x{} ({} -> {}{alpha}{suffix})",
+        "  {action:<7} {} -> {} — {}{dimensions} ({} -> {}{alpha}{suffix})",
         common::display_path(&evaluation.source),
         common::display_path(&prepared.plan.output),
         evaluation.winner.format.label(),
-        evaluation.dimensions.0,
-        evaluation.dimensions.1,
         common::format_bytes(evaluation.before),
         common::format_bytes(evaluation.winner.bytes),
     );
@@ -562,13 +613,13 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     if collected.files.is_empty() {
         return Err(ToolError::new(TOOL, "no supported files found"));
     }
-    for file in &collected.files {
+    for file in collected.files.iter().filter(|file| !is_svg(file)) {
         image_ops::assert_static(TOOL, file)?;
     }
 
     let started = Instant::now();
     println!(
-        "{TOOL}: evaluating {} file(s) as PNG, WebP, and eligible JPEG",
+        "{TOOL}: evaluating {} file(s) as PNG, WebP, eligible JPEG, or SVG",
         collected.files.len()
     );
     let pool = rayon::ThreadPoolBuilder::new()
@@ -705,7 +756,7 @@ mod tests {
         let evaluation = Evaluation {
             source: PathBuf::from("assets/photo.png"),
             before: 100,
-            dimensions: (1, 1),
+            dimensions: Some((1, 1)),
             transparent: false,
             winner: Candidate {
                 format: WebFormat::Webp,
@@ -749,5 +800,48 @@ mod tests {
         let evaluation = evaluate(&source, 82).unwrap();
         assert!(evaluation.transparent);
         assert_ne!(evaluation.winner.format, WebFormat::Jpeg);
+    }
+
+    #[test]
+    fn svg_stays_svg_beside_its_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("icon.svg");
+        fs::write(
+            &source,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\">\n\
+             <!-- comment -->\n\
+             <path d=\"M 0.0000 0.0000 L 10.0000 10.0000\" />\n\
+             </svg>\n",
+        )
+        .unwrap();
+        let evaluation = evaluate(&source, 82).unwrap();
+        assert_eq!(evaluation.winner.format, WebFormat::Svg);
+        assert!(evaluation.winner.bytes < evaluation.before);
+        assert!(evaluation.dimensions.is_none());
+        let CandidateFile::Temporary(candidate) = &evaluation.winner.file else {
+            panic!("a smaller SVG should be a new candidate");
+        };
+        assert!(fs::read_to_string(candidate).unwrap().contains("viewBox"));
+        assert_eq!(
+            output_for(&evaluation, &parse(Vec::new()).unwrap()),
+            directory.path().join("icon-optimized.svg")
+        );
+    }
+
+    #[test]
+    fn already_minimal_svg_keeps_the_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("min.svg");
+        let minimal = svg::optimize_svg(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"/>",
+            "fixture",
+            svg::DEFAULT_PRECISION,
+            true,
+        )
+        .unwrap();
+        fs::write(&source, minimal).unwrap();
+        let evaluation = evaluate(&source, 82).unwrap();
+        assert!(matches!(evaluation.winner.file, CandidateFile::Original));
     }
 }

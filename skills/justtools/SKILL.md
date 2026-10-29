@@ -25,6 +25,8 @@ Claude-only or Codex-only tool name when a normal shell operation is sufficient.
    repository is present, build and install it with
    `cargo build --locked --release -p justtools` followed by
    `just install`. Do not mutate PATH unless the user wants the installation.
+   On Windows `just install` also adds the File Explorer menu; pass
+   `--no-context-menu` when the user did not ask for it.
 2. Choose the narrowest command. Load
    [references/commands.md](references/commands.md) only when its command map or
    examples are needed.
@@ -88,6 +90,11 @@ installer and may surface UAC or `sudo` prompts.
 
 ## Safety rules
 
+- If Windows antivirus blocks JustTools, record the detection and artifact
+  details. Do not add exclusions, disable protection, or restore quarantined
+  files to execute them. Use `docs/windows-security.md` to verify a release
+  and prepare its submission for Microsoft review; a successful rebuild or
+  scan alone does not prove the older detection was a false positive.
 - JustPaste's Windows Smart Paste mode runs from the same binary (`just paste
   --enable` / `--disable` / `--status`); login startup is a separate opt-in.
   JustPaste's CLI and clipboard also work on macOS and Linux. macOS uses
@@ -111,6 +118,13 @@ installer and may surface UAC or `sudo` prompts.
   a cut payload into a filtered move. Explicit CLI calls use saved filters only
   with `--saved-settings`; Explorer's JustPaste entry passes that flag.
   Clipboard images save locally as PNG; ordinary text needs `--text`.
+  `--as FORMAT` converts locally (OCR uses Windows' engine). `--ai`/`--ai-action`
+  sends the copied or piped text to the chosen AI service: confirm the user
+  wants that text shared with that provider before running it, prefer
+  `--dry-run` first, and never pass keys as arguments; they come only from
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and the other documented variables.
+  For protocol tests, point `--ai-endpoint` at a loopback fixture with a fake
+  key, never the user's real key.
   Git repository links clone into a repo-named subfolder with history and
   `origin`; existing names are numbered. Preview with `--dry-run` first.
   Git uses `PATH` or resolve-only `GIT_BIN`; missing Git still requires
@@ -201,7 +215,8 @@ the shared file.
   keep the source, and write `image-resized.jpg`.
 - `justoptimize image.png`: encode and measure PNG/WebP/JPEG candidates, retain
   transparency when needed, keep the source, and write the smallest useful
-  result as `image-optimized.<best-format>`.
+  result as `image-optimized.<best-format>`. SVGs stay SVG and use the
+  conservative JustSVG preset.
 - `justcrop image.png`: trim to nonzero-alpha bounds, preserve format, keep the
   source, and write `image-cropped.png`.
 - `justcrop frames --shared-bounds`: union visible bounds within each folder so
