@@ -9,7 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Settings, ai, clipboard::Snapshot, convert, free_path};
+#[cfg(any(windows, test))]
+use super::Settings;
+use super::{ai, clipboard::Snapshot, convert, free_path};
 use crate::common;
 
 /// A file format the clipboard can be pasted as.
