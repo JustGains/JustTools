@@ -229,6 +229,7 @@ pub fn custom_actions(value: &str) -> Vec<Custom> {
 }
 
 /// Checks custom-action lines before they are saved.
+#[cfg(any(windows, test))]
 pub fn validate_custom_actions(value: &str) -> Result<String, String> {
     let mut lines = Vec::new();
     for line in value.lines().map(str::trim).filter(|line| !line.is_empty()) {

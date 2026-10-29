@@ -41,6 +41,7 @@ struct Settings {
     text: bool,
     /// What Ctrl+V and `--saved-settings` do with each kind of clipboard content.
     paste: actions::Defaults,
+    #[cfg(any(windows, test))]
     picker: actions::Picker,
     /// The AI service, present only when AI paste is enabled.
     ai: Option<ai::Config>,
@@ -60,6 +61,7 @@ impl Settings {
             gitignore: store.get(TOOL, "gitignore") == Some("true"),
             text,
             paste: actions::Defaults::load(&store, text),
+            #[cfg(any(windows, test))]
             picker: actions::Picker::load(&store),
             ai: (store.get(TOOL, "ai") == Some("true")).then(|| ai::Config::load(&store)),
             custom: ai::custom_actions(store.get(TOOL, "custom_actions").unwrap_or("")),

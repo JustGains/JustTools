@@ -28,6 +28,7 @@ pub enum Format {
 }
 
 impl Format {
+    #[cfg(any(windows, test))]
     pub const ALL: [Format; 10] = [
         Format::Txt,
         Format::Md,
@@ -152,6 +153,7 @@ pub enum Action {
     /// Copied page links saved as Markdown through Cloudflare Browser Run.
     PageMarkdown,
     /// Copied text transformed by the configured AI service.
+    #[cfg(any(windows, test))]
     Ai {
         name: String,
         prompt: String,
@@ -177,6 +179,7 @@ impl OnPaste {
         })
     }
 
+    #[cfg(windows)]
     pub fn value(&self) -> &'static str {
         match self {
             OnPaste::Ask => "ask",
@@ -290,6 +293,7 @@ impl Default for Defaults {
 }
 
 /// Shortcuts the picker can use. One key, never one per action.
+#[cfg(any(windows, test))]
 pub const PICKER_KEYS: &[(&str, &str)] = &[
     ("ctrl+shift+v", "Ctrl+Shift+V"),
     ("win+shift+v", "Win+Shift+V"),
@@ -298,6 +302,7 @@ pub const PICKER_KEYS: &[(&str, &str)] = &[
 ];
 
 /// Which actions the picker lists, and how it describes the clipboard.
+#[cfg(any(windows, test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Picker {
     pub key: &'static str,
@@ -313,6 +318,7 @@ pub struct Picker {
     pub close_on_blur: bool,
 }
 
+#[cfg(any(windows, test))]
 impl Default for Picker {
     fn default() -> Self {
         Self {
@@ -329,6 +335,7 @@ impl Default for Picker {
     }
 }
 
+#[cfg(any(windows, test))]
 impl Picker {
     pub fn load(store: &crate::preferences::Store) -> Self {
         let flag = |field: &str| store.get(super::TOOL, field) != Some("false");
@@ -353,12 +360,14 @@ impl Picker {
 }
 
 /// One picker entry. An AI action with an empty prompt asks for one.
+#[cfg(any(windows, test))]
 pub struct Entry {
     pub label: String,
     pub action: Action,
 }
 
 /// Every action that fits `snapshot`, in picker order.
+#[cfg(any(windows, test))]
 pub fn entries(snapshot: &Snapshot, settings: &Settings, cloudflare: bool) -> Vec<Entry> {
     let picker = &settings.picker;
     let mut entries = vec![Entry {
@@ -433,6 +442,7 @@ pub fn entries(snapshot: &Snapshot, settings: &Settings, cloudflare: bool) -> Ve
 }
 
 /// A one-line description of the clipboard for the picker. Never a path.
+#[cfg(any(windows, test))]
 pub fn preview(snapshot: &Snapshot) -> String {
     match snapshot {
         Snapshot::Image(bytes, format) => {
@@ -924,6 +934,7 @@ mod tests {
                 .collect()
         };
         let text = Snapshot::Text("hello".into());
+        assert_eq!(entries(&text, &settings, false)[0].action, Action::Native);
         assert_eq!(
             labels(&settings, &text),
             [
