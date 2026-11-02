@@ -148,8 +148,10 @@ Tagged Windows releases require the
 `JUSTTOOLS_SIGNING_PFX` (base64 PFX) and `JUSTTOOLS_SIGNING_PASSWORD` secrets,
 which sign and timestamp the executable, DLL, and `justtools-shell.msix` in the
 Windows archives; the certificate must chain to a root the user's machine
-trusts. Branch builds can be unsigned. A current Defender scan of the payload
-and ZIP must also pass. See [Windows release verification](windows-security.md).
+trusts. Branch builds can be unsigned, and so can a release published with
+the `JUSTTOOLS_ALLOW_UNSIGNED_RELEASE` repository variable; it ships without the
+MSIX, so its top-level Windows 11 menu needs Developer Mode. A current Defender
+scan of the payload and ZIP must also pass. See [Windows release verification](windows-security.md).
 
 ## How it is built
 

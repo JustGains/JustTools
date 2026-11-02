@@ -8,6 +8,14 @@ repository secrets `JUSTTOOLS_SIGNING_PFX` (base64 PFX) and
 chain to a public root trusted by Windows. No key or password belongs in the
 repository. Unsigned branch builds remain available as CI artifacts.
 
+To publish one release unsigned on purpose, set the repository variable
+`JUSTTOOLS_ALLOW_UNSIGNED_RELEASE` to `true` before pushing the tag, then
+delete it once the release is out. That lifts only the signature requirement.
+The Defender scan, hash checks, and checksum sidecars all still gate
+publication, and a signature that is present but broken still blocks it. An
+unsigned release has no `justtools-shell.msix`, so the top-level Windows 11
+menu needs Developer Mode, and its release notes say so.
+
 Both Windows build jobs update Microsoft Defender's security intelligence and
 scan the executable, extension, optional identity package, and finished ZIP.
 A detection, scan error, inactive antivirus, or failed signature verification

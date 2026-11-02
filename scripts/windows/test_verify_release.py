@@ -45,9 +45,20 @@ class ReleaseVerificationTests(unittest.TestCase):
             for name, contents in self.payloads.items():
                 archive.writestr(name, contents)
 
-    def check(self):
+    def check(self, allow_unsigned=False):
         Path(f"{self.archive}.defender.json").write_text(json.dumps(self.report), encoding="utf-8")
-        verify_release(self.archive)
+        verify_release(self.archive, allow_unsigned)
+
+    def make_unsigned(self):
+        """Rebuild the fixture as an unsigned release: no identity package."""
+        del self.payloads["justtools-shell.msix"]
+        self.write_archive()
+        self.report["files"] = [
+            record for record in self.report["files"] if record["name"] != "justtools-shell.msix"
+        ]
+        for record in self.report["files"]:
+            record["signatureStatus"], record["signer"] = "NotSigned", None
+        self.report["files"][-1]["sha256"] = hashlib.sha256(self.archive.read_bytes()).hexdigest()
 
     def test_accepts_matching_payloads_and_archive(self):
         self.check()
@@ -69,6 +80,28 @@ class ReleaseVerificationTests(unittest.TestCase):
         self.report["files"][0]["signatureStatus"] = "NotSigned"
         with self.assertRaisesRegex(ValueError, "trusted signature"):
             self.check()
+
+    def test_unsigned_release_needs_the_explicit_opt_in(self):
+        self.make_unsigned()
+        with self.assertRaisesRegex(ValueError, "missing justtools-shell.msix"):
+            self.check()
+        self.check(allow_unsigned=True)
+
+    def test_opt_in_still_rejects_broken_signatures_and_substitution(self):
+        self.make_unsigned()
+        self.report["files"][0]["signatureStatus"] = "HashMismatch"
+        with self.assertRaisesRegex(ValueError, "trusted signature"):
+            self.check(allow_unsigned=True)
+        self.report["files"][0]["signatureStatus"] = "NotSigned"
+        self.report["files"][0]["sha256"] = hashlib.sha256(b"another executable").hexdigest()
+        with self.assertRaisesRegex(ValueError, "payload hash"):
+            self.check(allow_unsigned=True)
+
+    def test_opt_in_still_verifies_a_signed_release(self):
+        self.check(allow_unsigned=True)
+        self.report["files"][1]["signer"] = "CN=Another publisher"
+        with self.assertRaisesRegex(ValueError, "same publisher"):
+            self.check(allow_unsigned=True)
 
     def test_rejects_scan_errors_and_files_changed_during_scan(self):
         for field, value in (("exitCode", 2), ("unchanged", False)):

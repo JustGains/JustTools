@@ -344,7 +344,8 @@ the entry point Explorer uses and is not meant to be typed. See
 Tagged Windows releases require trusted signatures on `just.exe`, the DLL,
 and the MSIX identity, plus a passing Defender scan of those files and the ZIP.
 The `.defender.json` sidecar records hashes and intelligence versions. Branch
-artifacts may be unsigned. For a detection, preserve its details and submit
+artifacts may be unsigned, and so may a release the maintainer publishes with
+the `JUSTTOOLS_ALLOW_UNSIGNED_RELEASE` repository variable; its notes say so. For a detection, preserve its details and submit
 the affected release for Microsoft review; do not add antivirus exclusions or
 disable protection. See `docs/windows-security.md`.
 

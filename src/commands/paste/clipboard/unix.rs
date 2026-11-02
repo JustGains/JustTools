@@ -200,8 +200,10 @@ if (result.kind === 'unsupported') {
     var text = board.stringForType($('public.utf8-plain-text'));
     if (!text || !text.length) text = board.stringForType($('public.url'));
     var html = board.stringForType($('public.html'));
-    if (text && html && html.length) result = {kind: 'html', text: ObjC.unwrap(text), html: ObjC.unwrap(html)};
-    else if (text) result = {kind: 'text', text: ObjC.unwrap(text)};
+    // A missing string comes back as a truthy nil object, so test its length.
+    var found = text && text.length;
+    if (found && html && html.length) result = {kind: 'html', text: ObjC.unwrap(text), html: ObjC.unwrap(html)};
+    else if (found) result = {kind: 'text', text: ObjC.unwrap(text)};
 }
 if (board.changeCount !== count) throw new Error('Clipboard changed before paste; copy it again');
 JSON.stringify(result);

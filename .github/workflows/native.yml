@@ -193,6 +193,7 @@ jobs:
         env:
           JUSTTOOLS_SIGNING_PFX: ${{ secrets.JUSTTOOLS_SIGNING_PFX }}
           JUSTTOOLS_SIGNING_PASSWORD: ${{ secrets.JUSTTOOLS_SIGNING_PASSWORD }}
+          JUSTTOOLS_ALLOW_UNSIGNED_RELEASE: ${{ vars.JUSTTOOLS_ALLOW_UNSIGNED_RELEASE }}
         run: |
           $stage = "dist/${{ matrix.artifact }}"
           $archive = "dist/${{ matrix.artifact }}.zip"
@@ -202,7 +203,10 @@ jobs:
           Copy-Item docs, skills -Destination $stage -Recurse
           $taggedRelease = $env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME.StartsWith("v")
           if ($taggedRelease -and !$env:JUSTTOOLS_SIGNING_PFX) {
-            throw "Windows releases require JUSTTOOLS_SIGNING_PFX and JUSTTOOLS_SIGNING_PASSWORD for trusted code signing. Unsigned branch builds are available as CI artifacts."
+            if ($env:JUSTTOOLS_ALLOW_UNSIGNED_RELEASE -ne "true") {
+              throw "Windows releases require JUSTTOOLS_SIGNING_PFX and JUSTTOOLS_SIGNING_PASSWORD for trusted code signing. Unsigned branch builds are available as CI artifacts. To publish this release unsigned on purpose, set the repository variable JUSTTOOLS_ALLOW_UNSIGNED_RELEASE to true."
+            }
+            Write-Host "::warning::Publishing unsigned Windows files because JUSTTOOLS_ALLOW_UNSIGNED_RELEASE is true."
           }
           $expectedVersion = (& "target/release/${{ matrix.executable }}" --version) -replace '^just ', ''
           if ($LASTEXITCODE -ne 0) { throw "Cannot read the executable version." }
@@ -497,6 +501,8 @@ jobs:
 
       - name: Verify release archives
         shell: bash
+        env:
+          JUSTTOOLS_ALLOW_UNSIGNED_RELEASE: ${{ vars.JUSTTOOLS_ALLOW_UNSIGNED_RELEASE }}
         run: |
           expected=(
             justtools-windows-x64.zip
@@ -517,17 +523,26 @@ jobs:
             fi
             (cd dist && sha256sum -c "$archive.sha256")
           done
-          python3 scripts/windows/verify-release.py dist/justtools-windows-x64.zip dist/justtools-windows-arm64.zip
+          unsigned=()
+          if [[ "$JUSTTOOLS_ALLOW_UNSIGNED_RELEASE" == "true" ]]; then
+            unsigned+=(--allow-unsigned)
+          fi
+          python3 scripts/windows/verify-release.py "${unsigned[@]}" dist/justtools-windows-x64.zip dist/justtools-windows-arm64.zip
 
       - name: Publish release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          JUSTTOOLS_SIGNED: ${{ secrets.JUSTTOOLS_SIGNING_PFX != '' }}
         run: |
           title="JustTools $GITHUB_REF_NAME"
           prerelease=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
             prerelease+=(--prerelease)
+          fi
+          notes=()
+          if [[ "$JUSTTOOLS_SIGNED" != "true" ]]; then
+            notes+=(--notes "The Windows files in this release aren't code-signed, so SmartScreen may ask before the first run. The File Explorer menu still works: it appears under \"Show more options\", and in the top-level Windows 11 menu once Developer Mode is on.")
           fi
 
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -539,6 +554,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
+              "${notes[@]}" \
               --title "$title" \
               "${prerelease[@]}"
           fi
