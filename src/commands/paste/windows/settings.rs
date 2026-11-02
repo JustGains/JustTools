@@ -342,7 +342,7 @@ fn layout() -> Vec<Layout> {
         ),
         (
             w!("BUTTON"),
-            "Offer paste as file: .txt, .md, .html, .json, PNG, JPEG, WebP",
+            "Offer file formats and background removal",
             SHOW_FILE,
             [44, 424, 552, 26],
             check,

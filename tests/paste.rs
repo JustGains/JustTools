@@ -563,6 +563,40 @@ fn paste(source: &Path, output: &Path, extra: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn background_removal_cli_previews_images_and_rejects_other_sources_without_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("portrait with spaces.PNG");
+    let output = temp.path().join("cutouts");
+    image::RgbaImage::from_pixel(4, 3, image::Rgba([150, 20, 40, 255]))
+        .save(&source)
+        .unwrap();
+    let original = fs::read(&source).unwrap();
+    let result = paste(&source, &output, &["--as", "rmbg", "--dry-run"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let preview = String::from_utf8_lossy(&result.stdout);
+    assert!(preview.contains("justrmbg"), "{preview}");
+    assert!(
+        preview.contains("portrait with spaces-nobg.png"),
+        "{preview}"
+    );
+    assert!(preview.contains("source kept, no overwrite"), "{preview}");
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert!(!output.exists());
+
+    let note = temp.path().join("note.txt");
+    fs::write(&note, "keep text").unwrap();
+    let result = paste(&note, &output, &["--as", "rmbg"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("copied still-image files"));
+    assert!(!output.exists());
+    assert_eq!(fs::read_to_string(note).unwrap(), "keep text");
+}
+
+#[test]
 fn headless_filtered_copy_preview_execution_and_numbered_collision() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("project with spaces");

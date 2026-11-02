@@ -1159,6 +1159,7 @@ fn paste_formats() -> Vec<Choice> {
         choice("PNG image", "png", &["--as", "png"]),
         choice("JPEG image", "jpg", &["--as", "jpg"]),
         choice("WebP image", "webp", &["--as", "webp"]),
+        choice("Paste with removed background", "rmbg", &["--as", "rmbg"]),
     ];
     if cfg!(windows) {
         formats.push(choice("Text from image (OCR)", "ocr", &["--as", "ocr"]));
@@ -3050,5 +3051,22 @@ mod tests {
                 .find(|value| value.field.id == "download")
                 .is_some_and(|value| !value.field.persistent && value.value == "true")
         );
+    }
+
+    #[test]
+    fn paste_background_removal_has_an_exact_headless_command_and_is_one_run() {
+        let mut app = app_for("justpaste");
+        let selected = app
+            .values
+            .iter_mut()
+            .find(|value| value.field.id == "paste_as")
+            .unwrap();
+        selected.value = "rmbg".into();
+        assert!(!selected.field.persistent);
+        let args = app.args().unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--as", "rmbg"]));
+        assert!(args.iter().any(|arg| arg == "--clipboard"));
+        assert!(!args.iter().any(|arg| arg == "--download"));
+        assert!(app.command().contains("--as rmbg"));
     }
 }

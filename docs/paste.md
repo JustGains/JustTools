@@ -54,6 +54,7 @@ clipboard always becomes a new file, and nothing is typed into other apps.
 | `html` | Text or rich text | A standalone UTF-8 page holding the copied fragment (plain text is escaped) |
 | `json` | Text | Pretty JSON from JSON, XML, CSV/TSV with a header row, INI, or `key: value` lines; other text becomes a JSON string |
 | `png`, `jpg`, `webp` | An image (or one image file with `--copy`) | `Image <date time>.<ext>`; PNG and WebP keep alpha, JPEG is flattened onto white |
+| `rmbg` | An image or copied still-image files (also `--copy`) | Transparent PNGs through JustRMBG: `Image <date time>-nobg.png` or `<source>-nobg.png`; sources are kept |
 | `ocr` | An image | `Image text <date time>.txt`, read locally by the Windows OCR engine (Windows only) |
 | `mp3`, `mp4` | Copied audio/video files, `--copy` media, or links | Transcoded with JustMP3/JustVideo in a hidden workspace; sources are kept |
 
@@ -62,6 +63,8 @@ justpaste --clipboard --as md                  # copied web page selection -> .m
 printf 'name,count\nApples,3\n' | justpaste --as json
 justpaste --clipboard --as ocr                 # screenshot text -> .txt (Windows)
 justpaste --as jpg --copy screenshot.png -o exports
+justpaste --clipboard --as rmbg                # paste with removed background
+justpaste --as rmbg --copy portrait.jpg -o cutouts
 justpaste --as mp3 --copy talk.mov             # keeps talk.mov
 justpaste --as mp4 https://www.youtube.com/watch?v=ID
 ```
@@ -70,6 +73,15 @@ Every result is published atomically under an unused name, and `--dry-run`
 writes nothing. A format that does not fit the clipboard fails before anything
 is written; `--as` cannot be combined with `--markdown`, `--profile-photo`, or
 `--playlist`.
+
+**Paste with removed background** uses the same local BRIA inference as
+[`justrmbg`](rmbg.md), keeps the image dimensions, and numbers taken output
+names. It appears in the picker for image data and selections consisting only
+of copied still-image files; cut files, folders, and mixed selections are
+excluded. It follows the **Offer file formats and background removal**
+setting and applies only to this paste. Missing RMBG runtimes and models
+retain their download confirmation;
+run bare `justrmbg` in a terminal first to review and approve their installation.
 
 ### AI paste
 
@@ -148,12 +160,18 @@ Instead of one shortcut per format, JustPaste has a single picker shortcut,
 **Ctrl+Shift+V** by default (Win+Shift+V, Ctrl+Alt+V, or off in settings). In
 Explorer's file pane it opens a menu at the cursor listing only the actions
 that fit the clipboard: **Paste normally**, JustPaste's own download/copy
-handling, Markdown pages, every paste-as format, transcoding, and, with AI
+handling, Markdown pages, every paste-as format, **Paste with removed
+background**, transcoding, and, with AI
 enabled, Fix spelling and grammar, each custom action, and **Paste with AI…**.
-Entries are numbered 1–9 and 0 for the keyboard, the Ctrl+V choice is bold,
-and Esc closes the menu without pasting. A header line describes the clipboard
-(image size, link count, or the first words of text) unless the clipboard
-preview is turned off; it never shows paths.
+The picker is a native Windows menu, so it follows the light or dark app
+theme, scales sharply on every monitor, and works with screen readers. Each
+action has an icon, related actions are grouped (JustPaste's own handling, text
+files, image formats, image tools, media, AI), and the number keys 1–9 and 0
+run entries directly; the key is shown on the right. The Ctrl+V choice is bold,
+and Esc closes the menu without pasting. Link actions name what they will do:
+**Download link**, **Clone repository**, or **Download as MP4**. A header line
+describes the clipboard (image size, the linked sites, or the first words of
+text) unless the clipboard preview is turned off; it never shows paths.
 
 AI actions open a review window when **Review answers before saving** is on
 (PowerToys' custom preview): the instruction, the answer to read or edit, and
@@ -187,33 +205,44 @@ Opening settings from the tray does not request administrator rights or process
 breakaway, so it also works when the resident is inside a restricted Windows
 process job. The background resident's startup detachment remains separate.
 
-Right-click the icon for **Open settings…**, **Pause Smart Paste**, the copy
-filters, **Start at sign-in**, **Open last folder**, **Cancel current paste**,
-and **Quit JustPaste**. The menu groups related actions and disables Open last
-folder and Cancel current paste when they do not apply. Action in the bare
-console launcher is a one-run choice, never a saved default.
+Right-click the icon for a menu in the same native style. Its first line says
+whether Smart Paste is on, paused, or pasting, with both shortcuts beside it.
+Below are **Settings…**, **Pause Smart Paste** (or **Resume**), **Open last
+folder** and **Cancel current paste** when they apply, the two copy filters
+and **Start at sign-in** as check marks, and **Quit JustPaste**. Action in the
+bare console launcher is a one-run choice, never a saved default.
 
-Ctrl+V work runs in the same executable outside Explorer, with tray
-notifications and no console. Starting it detaches the resident from the
+Ctrl+V work runs in the same executable outside Explorer, with no console.
+Like Explorer's own paste, a successful paste is announced by the new file
+itself, not by a notification; failures still raise one unless the progress
+card already shows them. Starting Smart Paste is quiet too, including at
+sign-in: `--enable` confirms it in the terminal, and the tray icon appears. Starting it detaches the resident from the
 launching terminal's process job and standard streams, so closing that terminal
 does not stop Smart Paste. If the host forbids independent processes, startup
 reports an error instead of starting a listener that will disappear with it;
 start Smart Paste from the Explorer launcher in that case. Login startup remains
-a separate opt-in. The right-click JustPaste action retains the
-normal console result and uses `--clipboard --saved-settings`, so it follows
-the same saved Ctrl+V choices ("ask" falls back to the default handling). Explorer's own
+a separate opt-in. On Windows 11 24H2 and later, the sign-in start, the tray's
+settings window, and the other Smart Paste controls open no console window at
+all; every other command still gets its console when started from Explorer.
+The right-click **JustPaste · paste here** action runs without a console
+window too: it shows the same progress card, shows any failure on it, and
+uses `--clipboard --saved-settings`, so it follows the same saved Ctrl+V
+choices ("ask" falls back to the default handling). Explorer's own
 mouse **Paste** command is unchanged; use **JustPaste** for filtered mouse
 pasting. Only ordinary File Explorer windows are hooked, not Desktop or
 application file dialogs. No administrator service or extra executable is used.
 
-A paste that takes longer than about a second opens a small progress window
-without taking keyboard focus. It shows the destination, current step, elapsed
-time, and download percentage, speed, and time remaining when available.
-Tool downloads and update checks appear as steps too. Percentage describes the
-current stream; a video may download audio separately before combining them.
-**Cancel paste** stops the operation and keeps completed files. Closing the
-window hides progress while the paste continues. Successful pastes close the
-window automatically; errors stay visible until dismissed.
+A paste that takes longer than about a second shows a small progress card at
+the bottom center of the screen, above the taskbar and clear of notifications.
+It never takes keyboard focus and follows the light or dark theme and accent
+color. It shows the current step, download percentage, speed, and time
+remaining when available, with a progress bar. Tool downloads and update
+checks appear as steps too. Percentage describes the current stream; a video
+may download audio separately before combining them. **Cancel** stops the
+operation and keeps completed files. The **×** hides progress while the paste
+continues. When the paste finishes, the card names the saved file and closes
+after a moment; a failure stays for about fifteen seconds, and longer while
+the pointer rests on it.
 
 `--status` shows whether copy filters are on (JustPaste copies files) or off
 (Explorer copies files), and also pause/busy state, the last Explorer paste decision, and

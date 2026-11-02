@@ -60,6 +60,10 @@ the menu never does anything the command line cannot.
   window open until Enter.
 - Entries ending in **…** open the tool's [console launcher](console-ui.md)
   with the selection filled in, so saved defaults and every option apply.
+- **JustPaste · paste here** is the one exception: it opens no console window.
+  It runs the same headless command with a hidden console, shows JustPaste's
+  progress card while a paste takes more than a moment, and keeps any failure
+  on that card until it is read. A quick success shows only the new file.
 
 ## Defaults
 

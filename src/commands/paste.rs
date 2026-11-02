@@ -22,6 +22,7 @@ use crate::error::{ToolError, ToolResult};
 const TOOL: &str = "justpaste";
 mod actions;
 mod ai;
+mod background;
 mod clipboard;
 mod cloudflare;
 mod convert;
@@ -152,7 +153,8 @@ the copied text.
 Paste as (Advanced Paste):
       --as FORMAT     Save the clipboard, piped text, links, or --copy media as
                       txt, md, html, json (text; rich text keeps its structure),
-                      png, jpg, webp (images), ocr (image text, Windows), or
+                      png, jpg, webp (images), rmbg (remove background with
+                      JustRMBG), ocr (image text, Windows), or
                       mp3, mp4 (transcode copied media or downloaded links)
       --ai PROMPT     Transform copied or piped text with AI and save the answer
       --ai-action NAME  Run a saved custom action (or fix-spelling) with AI
@@ -265,7 +267,7 @@ fn parse(args: Vec<OsString>) -> ToolResult<Options> {
                     ToolError::usage(
                         TOOL,
                         format!(
-                            "--as expects txt, md, html, json, png, jpg, webp, ocr, mp3, or mp4, not {value}"
+                            "--as expects txt, md, html, json, png, jpg, webp, rmbg, ocr, mp3, or mp4, not {value}"
                         ),
                     )
                 })?);
@@ -876,15 +878,39 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         ));
     }
     common::init_signals();
-    let mut options = parse(args)?;
+    let options = parse(args)?;
     if options.help {
         help();
         return Ok(());
     }
+    let result = execute(options)?;
+    println!("{TOOL}: {result}");
+    Ok(())
+}
+
+/// One Explorer menu paste without a console window: native progress, then
+/// the same result line the headless command prints, shown natively.
+#[cfg(windows)]
+pub fn run_windowless(args: Vec<OsString>) -> ToolResult {
+    common::init_signals();
+    windows::windowless(move || {
+        let options = parse(args).map_err(|error| error.message().to_owned())?;
+        execute(options).map_err(|error| error.message().to_owned())
+    })
+    .map_err(|message| ToolError::new(TOOL, message))
+}
+
+/// Show why an Explorer menu paste could not start, without a console.
+#[cfg(windows)]
+pub fn report_windowless(message: &str) {
+    let message = message.to_owned();
+    let _ = windows::windowless(move || Err(message));
+}
+
+/// Paste as `options` asks and return the closing result line.
+fn execute(mut options: Options) -> ToolResult<String> {
     if options.format.is_some() || options.ai_prompt.is_some() || options.ai_action.is_some() {
-        let result = special(options)?;
-        println!("{TOOL}: {result}");
-        return Ok(());
+        return special(options);
     }
     if !options.copies.is_empty() {
         if options.clipboard
@@ -898,7 +924,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             ));
         }
         let output = options.output.unwrap_or_else(|| PathBuf::from("."));
-        let result = save_snapshot(
+        return save_snapshot(
             clipboard::Snapshot::Files {
                 paths: options.copies,
                 cut: false,
@@ -907,9 +933,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             &options.settings,
             options.dry_run,
         )
-        .map_err(|e| ToolError::new(TOOL, e))?;
-        println!("{TOOL}: {result}");
-        return Ok(());
+        .map_err(|e| ToolError::new(TOOL, e));
     }
     let mut urls = links(&options.inputs.join("\n"));
     if options.inputs.iter().any(|input| links(input).is_empty()) {
@@ -929,10 +953,8 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             {
                 OnPaste::Act(Action::As(format)) => {
                     let output = options.output.clone().unwrap_or_else(|| PathBuf::from("."));
-                    let result = actions::paste_as(format, snapshot, &output, options.dry_run)
-                        .map_err(|e| ToolError::new(TOOL, e))?;
-                    println!("{TOOL}: {result}");
-                    return Ok(());
+                    return actions::paste_as(format, snapshot, &output, options.dry_run)
+                        .map_err(|e| ToolError::new(TOOL, e));
                 }
                 OnPaste::Act(Action::PageMarkdown) => options.mode = LinkMode::Markdown,
                 _ => {}
@@ -948,10 +970,8 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
                     ));
                 }
                 let output = options.output.clone().unwrap_or_else(|| PathBuf::from("."));
-                let result = save_snapshot(snapshot, &output, &options.settings, options.dry_run)
-                    .map_err(|e| ToolError::new(TOOL, e))?;
-                println!("{TOOL}: {result}");
-                return Ok(());
+                return save_snapshot(snapshot, &output, &options.settings, options.dry_run)
+                    .map_err(|e| ToolError::new(TOOL, e));
             }
         };
         let copied = links(&text);
@@ -971,15 +991,13 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
         urls = links(&text);
         if urls.is_empty() && options.settings.text {
             let output = options.output.as_deref().unwrap_or(Path::new("."));
-            let result = save_snapshot(
+            return save_snapshot(
                 clipboard::Snapshot::Text(text),
                 output,
                 &options.settings,
                 options.dry_run,
             )
-            .map_err(|e| ToolError::new(TOOL, e))?;
-            println!("{TOOL}: {result}");
-            return Ok(());
+            .map_err(|e| ToolError::new(TOOL, e));
         }
     }
     if urls.is_empty() {
@@ -1031,7 +1049,10 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
                 );
             }
         }
-        return Ok(());
+        return Ok(format!(
+            "dry run, nothing written for {} link(s)",
+            urls.len()
+        ));
     }
     fs::create_dir_all(&directory).map_err(|error| {
         ToolError::new(
@@ -1051,6 +1072,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     let mut saved = 0;
     let mut cloned = 0;
     let mut failed = 0;
+    let mut first_failure = None;
     for url in &urls {
         if common::interrupted() {
             break;
@@ -1086,6 +1108,7 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
             Err(reason) => {
                 failed += 1;
                 eprintln!("  failed  {url}: {reason}");
+                first_failure.get_or_insert(reason);
             }
         }
     }
@@ -1099,13 +1122,25 @@ pub fn run(args: Vec<OsString>) -> ToolResult {
     if failed > 0 {
         summary.push(format!("{failed} failed"));
     }
-    println!("{TOOL}: {}", summary.join(", "));
-    if failed > 0 {
-        Err(ToolError::new(TOOL, "some links could not be pasted"))
+    let summary = summary.join(", ");
+    if let Some(reason) = first_failure {
+        println!("{TOOL}: {summary}");
+        Err(ToolError::new(
+            TOOL,
+            if urls.len() == 1 {
+                reason
+            } else {
+                format!(
+                    "{failed} of {} links could not be pasted; first: {reason}",
+                    urls.len()
+                )
+            },
+        ))
     } else if common::interrupted() {
+        println!("{TOOL}: {summary}");
         Err(ToolError::cancelled(TOOL))
     } else {
-        Ok(())
+        Ok(summary)
     }
 }
 

@@ -4,6 +4,7 @@
 //! Explorer starts when an entry is chosen: it turns the entry's ID and the
 //! selected paths into the same headless command a terminal user would type,
 //! shows that command, runs it, and keeps the window readable afterwards.
+//! Windowless entries run the same command with native progress instead.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -635,6 +636,10 @@ fn run_entry(args: Vec<OsString>) -> ToolResult {
     }
     let action =
         menu::action(&id).ok_or_else(|| usage(format!("unknown context-menu entry: {id}")))?;
+    #[cfg(windows)]
+    if action.windowless && !console_window() {
+        return windowless(&action, &paths);
+    }
     let outcome = perform(&action, &paths);
     if !interactive() {
         return match outcome? {
@@ -656,6 +661,33 @@ fn run_entry(args: Vec<OsString>) -> ToolResult {
     hold(failed, action.hold);
     // The failure has been shown and acknowledged. A nonzero exit status
     // would only make Windows Terminal keep the finished tab open.
+    Ok(())
+}
+
+/// Whether this process has a console window someone can read. Explorer
+/// starts windowless entries with a hidden console, which has none.
+#[cfg(windows)]
+fn console_window() -> bool {
+    !unsafe { windows::Win32::System::Console::GetConsoleWindow() }.is_invalid()
+}
+
+/// Run a windowless entry: the tool reports progress and its result natively.
+#[cfg(windows)]
+fn windowless(action: &Action, paths: &[PathBuf]) -> ToolResult {
+    let Some(Tool::Paste) = action.tool else {
+        return Err(ToolError::new("just", "this entry has no windowless form"));
+    };
+    // Without a console, a failure nobody sees would look like nothing happened.
+    let shown = |error: ToolError| {
+        crate::commands::paste::report_windowless(error.message());
+        error
+    };
+    let invocations = plan(action, Tool::Paste, paths)
+        .map_err(|message| shown(ToolError::new("just", message)))?;
+    for invocation in invocations {
+        enter(&invocation.directory).map_err(shown)?;
+        crate::commands::paste::run_windowless(invocation.args)?;
+    }
     Ok(())
 }
 

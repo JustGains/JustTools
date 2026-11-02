@@ -211,8 +211,8 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wp: WPARAM, lp: 
 /// Show the AI window and block until it closes. Returns the saved result line.
 pub(super) fn run(job: Job) -> Result<Option<String>, String> {
     job.config.validate()?;
+    let _scaling = super::theme::SystemDpi::begin();
     unsafe {
-        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
         let scale = GetDpiForSystem() as f32 / 96.0;
         let px = |value: i32| (value as f32 * scale).round() as i32;
         let module = GetModuleHandleW(None).map_err(|e| e.to_string())?;

@@ -1,5 +1,9 @@
-//! The paste-as picker: one popup menu of every action that fits the clipboard.
+//! The paste-as picker: one menu of every action that fits the clipboard,
+//! grouped, with an icon per action and a number key on the right.
+use super::popup::{self, Menu};
+use super::theme::glyph;
 use super::*;
+use actions::Format;
 
 const PICKER_CLASS: PCWSTR = w!("JustTools.SmartPaste.Picker.v1");
 
@@ -20,6 +24,11 @@ pub(super) fn take_foreground(window: HWND) {
 }
 
 unsafe extern "system" fn owner(window: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if message == WM_MENUCHAR
+        && let Some(result) = popup::menu_char(wp)
+    {
+        return result;
+    }
     unsafe { DefWindowProcW(window, message, wp, lp) }
 }
 
@@ -43,13 +52,80 @@ fn register() -> Result<HINSTANCE, String> {
         .map(|module| HINSTANCE(module as *mut _))
 }
 
-/// Mnemonic for entry `index`: 1–9, then 0, then none.
-fn mnemonic(index: usize, label: &str) -> String {
-    let label = label.replace('&', "&&");
-    match index {
-        0..=8 => format!("&{}   {label}", index + 1),
-        9 => format!("&0   {label}"),
-        _ => format!("     {label}"),
+/// The icon for what is on the clipboard.
+fn content(snapshot: &Snapshot) -> char {
+    match snapshot {
+        Snapshot::Image(..) => glyph::PICTURE,
+        Snapshot::Files { .. } => glyph::FOLDER,
+        Snapshot::Text(text) | Snapshot::Html { text, .. }
+            if !super::super::links(text).is_empty() =>
+        {
+            glyph::LINK
+        }
+        Snapshot::Html { .. } => glyph::GLOBE,
+        Snapshot::Text(_) => glyph::DOCUMENT,
+        Snapshot::Unsupported => glyph::UNKNOWN,
+    }
+}
+
+/// The icon for one action.
+fn icon(action: &Action, snapshot: &Snapshot) -> char {
+    match action {
+        Action::Native => glyph::PASTE,
+        Action::Smart if matches!(snapshot, Snapshot::Files { .. }) => glyph::COPY,
+        Action::Smart => glyph::DOWNLOAD,
+        Action::PageMarkdown => glyph::LINK,
+        Action::As(format) => match format {
+            Format::Txt => glyph::DOCUMENT,
+            Format::Md => glyph::LIST,
+            Format::Html => glyph::GLOBE,
+            Format::Json => glyph::CODE,
+            Format::Png | Format::Jpg | Format::Webp => glyph::PICTURE,
+            Format::Rmbg => glyph::CUT,
+            Format::Ocr => glyph::FONT,
+            Format::Mp3 => glyph::AUDIO,
+            Format::Mp4 => glyph::VIDEO,
+        },
+        Action::Ai { prompt, .. } if prompt.is_empty() => glyph::CHAT,
+        Action::Ai { name, .. } if name == super::super::ai::FIX_SPELLING => glyph::EDIT,
+        Action::Ai { .. } => glyph::BOLT,
+    }
+}
+
+/// Fill `menu` with the caption and grouped entries; entry `i` gets ID `i + 1`.
+pub(super) fn build(
+    menu: &mut Menu,
+    snapshot: &Snapshot,
+    entries: &[actions::Entry],
+    preview: bool,
+    default: &OnPaste,
+) {
+    if preview {
+        menu.caption(content(snapshot), &actions::preview(snapshot), "");
+        menu.separator();
+    }
+    let mut section = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if section.is_some_and(|section| section != entry.section()) {
+            menu.separator();
+        }
+        section = Some(entry.section());
+        let key = popup::number(index);
+        let hint = key.map(String::from).unwrap_or_default();
+        menu.item(
+            index + 1,
+            icon(&entry.action, snapshot),
+            &entry.label,
+            &hint,
+            key,
+            true,
+        );
+    }
+    // The Ctrl+V default is drawn bold, so the picker also teaches it.
+    if let OnPaste::Act(default) = default
+        && let Some(index) = entries.iter().position(|entry| &entry.action == default)
+    {
+        menu.default(index + 1);
     }
 }
 
@@ -98,38 +174,21 @@ pub(super) fn choose(
             None,
         )
         .map_err(|e| e.to_string())?;
-        let menu = CreatePopupMenu().map_err(|e| e.to_string())?;
-        if settings.picker.preview {
-            let preview = wide(std::ffi::OsStr::new(&actions::preview(snapshot)));
-            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(preview.as_ptr()));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        }
-        for (index, entry) in entries.iter().enumerate() {
-            if index == 1 {
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-            }
-            let label = wide(std::ffi::OsStr::new(&mnemonic(index, &entry.label)));
-            let _ = AppendMenuW(menu, MF_STRING, index + 1, PCWSTR(label.as_ptr()));
-        }
-        // The Ctrl+V default is drawn bold, so the picker also teaches it.
-        if let OnPaste::Act(default) = default
-            && let Some(index) = entries.iter().position(|entry| &entry.action == default)
-        {
-            let _ = SetMenuDefaultItem(menu, index as u32 + 1, 0);
-        }
+        let mut menu = Menu::new(point)?;
+        build(
+            &mut menu,
+            snapshot,
+            &entries,
+            settings.picker.preview,
+            default,
+        );
         take_foreground(owner);
-        let chosen = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
-            point.x,
-            point.y,
-            Some(0),
+        let chosen = menu.show(
             owner,
-            None,
-        )
-        .0 as usize;
-        let _ = DestroyMenu(menu);
-        let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+            point,
+            TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
+        );
+        drop(menu);
         take_foreground(explorer);
         let _ = DestroyWindow(owner);
         Ok(chosen
@@ -144,9 +203,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn entries_get_number_keys_and_escape_ampersands() {
-        assert_eq!(mnemonic(0, "Paste normally"), "&1   Paste normally");
-        assert_eq!(mnemonic(9, "A & B"), "&0   A && B");
-        assert_eq!(mnemonic(10, "Late"), "     Late");
+    fn every_action_has_its_own_fitting_icon() {
+        let image = Snapshot::Image(Vec::new(), image::ImageFormat::Png);
+        let files = Snapshot::Files {
+            paths: Vec::new(),
+            cut: false,
+        };
+        assert_eq!(icon(&Action::Native, &image), glyph::PASTE);
+        assert_eq!(icon(&Action::Smart, &files), glyph::COPY);
+        assert_eq!(
+            icon(&Action::Smart, &Snapshot::Text("https://x.test".into())),
+            glyph::DOWNLOAD
+        );
+        assert_eq!(icon(&Action::As(Format::Rmbg), &image), glyph::CUT);
+        assert_eq!(
+            icon(
+                &Action::Ai {
+                    name: "AI paste".into(),
+                    prompt: String::new()
+                },
+                &image
+            ),
+            glyph::CHAT
+        );
+        assert_eq!(
+            icon(
+                &Action::Ai {
+                    name: super::super::super::ai::FIX_SPELLING.into(),
+                    prompt: "fix".into()
+                },
+                &image
+            ),
+            glyph::EDIT
+        );
+        assert_eq!(content(&image), glyph::PICTURE);
+        assert_eq!(
+            content(&Snapshot::Text("see https://x.test".into())),
+            glyph::LINK
+        );
     }
 }

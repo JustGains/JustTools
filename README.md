@@ -41,6 +41,7 @@ justpaste https://x.com/Cloudflare           # save the public profile photo
 justpaste --markdown https://example.com    # Cloudflare page as Markdown
 echo 'Save this text' | justpaste --text     # CLI text input on every platform
 justpaste --clipboard --as md               # paste as .md/.html/.json/.jpg/.webp, OCR, MP3/MP4
+justpaste --clipboard --as rmbg             # paste a transparent PNG through JustRMBG
 justpaste --clipboard --ai "Summarize it"   # optional AI paste; keys only from the environment
 just paste --enable                        # Windows: Ctrl+V Smart Paste in Explorer
 justoptimize hero.png --dry-run
@@ -105,12 +106,17 @@ login is optional; the listener survives closing its launching terminal.
 Ctrl+V uses a saved choice per clipboard kind (text, image, links, media
 files), and **Ctrl+Shift+V** opens a picker of every paste-as action that fits,
 including AI actions when enabled: one shortcut instead of one per format.
+Images and copied image files also offer **Paste with removed background**,
+which calls JustRMBG and saves new transparent PNGs while keeping the sources.
 Click its violet-and-blue tray icon, or run `just paste --settings`, for native
 Windows settings with paste choices, AI, copy filters, and sign-in startup.
 Tray settings open without administrator rights, including under restricted
 Windows process jobs.
-Right-click for quick actions.
-Long pastes show a small progress window with Cancel. yt-dlp is downloaded when
+The picker and the tray's right-click menu are native Windows menus with icons,
+number keys, and dark mode. Long pastes show a small progress card with Cancel;
+successful pastes stay quiet, like Explorer's own. Smart Paste and the
+right-click **JustPaste · paste here** open no console window (on Windows 11
+24H2 and later, including the sign-in start). yt-dlp is downloaded when
 needed and checked for updates every twelve hours, with earlier retries on failure.
 If Ctrl+V does not produce a file, `just paste --status` shows the last paste
 decision and notification; `just paste --diagnose` checks Explorer connectivity

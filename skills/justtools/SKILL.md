@@ -118,7 +118,12 @@ installer and may surface UAC or `sudo` prompts.
   a cut payload into a filtered move. Explicit CLI calls use saved filters only
   with `--saved-settings`; Explorer's JustPaste entry passes that flag.
   Clipboard images save locally as PNG; ordinary text needs `--text`.
-  `--as FORMAT` converts locally (OCR uses Windows' engine). `--ai`/`--ai-action`
+  `--as FORMAT` converts locally (OCR uses Windows' engine). The picker action
+  **Paste with removed background** uses `--as rmbg` and JustRMBG to save new
+  transparent PNGs from image data or copied still-image files. It keeps sources,
+  numbers taken names, rejects cuts/mixed selections/folders, and never grants
+  RMBG dependency download permission; approve missing dependencies through
+  bare `justrmbg` in a terminal first. `--ai`/`--ai-action`
   sends the copied or piped text to the chosen AI service: confirm the user
   wants that text shared with that provider before running it, prefer
   `--dry-run` first, and never pass keys as arguments; they come only from

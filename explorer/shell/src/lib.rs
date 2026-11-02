@@ -36,8 +36,8 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::Win32::System::Threading::{
-    CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetCurrentProcessId,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_NEW_CONSOLE, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    GetCurrentProcessId, PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows::Win32::UI::Shell::{
     BHID_DataObject, DragQueryFileW, ECF_DEFAULT, ECF_HASSUBCOMMANDS, ECF_ISSEPARATOR, ECS_ENABLED,
@@ -463,7 +463,8 @@ impl IEnumExplorerCommand_Impl for Commands_Impl {
     }
 }
 
-/// Start `just.exe context run <id>` in its own console window.
+/// Start `just.exe context run <id>` in its own console window, or with a
+/// hidden console for windowless entries, which report natively instead.
 ///
 /// The selection travels in a temporary list file: a command line holds
 /// about 32,000 characters and a selection can hold far more than that.
@@ -493,6 +494,13 @@ fn launch(id: &str, paths: &[String]) -> std::result::Result<(), String> {
         ..Default::default()
     };
     let mut process = PROCESS_INFORMATION::default();
+    // A hidden console still hosts every helper the tool starts, so none of
+    // them can open a window of its own.
+    let console = if menu::action(id).is_some_and(|action| action.windowless) {
+        CREATE_NO_WINDOW
+    } else {
+        CREATE_NEW_CONSOLE
+    };
     let started = unsafe {
         CreateProcessW(
             &HSTRING::from(executable.as_os_str()),
@@ -500,7 +508,7 @@ fn launch(id: &str, paths: &[String]) -> std::result::Result<(), String> {
             None,
             None,
             false,
-            CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+            console | CREATE_UNICODE_ENVIRONMENT,
             None,
             PCWSTR::null(),
             &startup,
@@ -610,7 +618,14 @@ mod tests {
                 LAUNCHES.fetch_add(1, Ordering::Relaxed)
             ));
             std::fs::write(&path, b"{}").unwrap();
-            Self(path)
+            // TEMP may be an 8.3 short path (CI's is C:\Users\RUNNER~1), but
+            // the shell reports the long, on-disk name, so compare with that.
+            let long = std::fs::canonicalize(&path).unwrap();
+            let long = long
+                .to_str()
+                .and_then(|long| long.strip_prefix(r"\\?\"))
+                .map_or(long.clone(), PathBuf::from);
+            Self(long)
         }
 
         fn items(&self) -> IShellItemArray {

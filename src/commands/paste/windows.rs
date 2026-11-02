@@ -28,8 +28,12 @@ use windows::{
 
 mod ai_window;
 mod picker;
+mod popup;
+#[cfg(test)]
+mod preview;
 mod progress_window;
 mod settings;
+mod theme;
 
 fn app_icon(size: i32) -> HICON {
     unsafe {
@@ -92,8 +96,18 @@ static MAINTAINING: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 static LAST_STATE: AtomicU32 = AtomicU32::new(0);
 static REQUESTS: OnceLock<SyncSender<Request>> = OnceLock::new();
-static NOTICES: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+static NOTICES: Mutex<Vec<(String, Notice)>> = Mutex::new(Vec::new());
 static LAST_FOLDER: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// How a message reaches the user. Every message is also kept as the last
+/// notification that `--status` reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notice {
+    Info,
+    Error,
+    /// Kept for `--status` only: the result is already visible.
+    Quiet,
+}
 
 #[derive(Clone, Copy)]
 struct Request {
@@ -443,12 +457,46 @@ fn same_target(request: &Request) -> bool {
 }
 
 fn notify(message: impl Into<String>, error: bool) {
+    post(
+        message.into(),
+        if error { Notice::Error } else { Notice::Info },
+    );
+}
+
+/// Keep a result for `--status` without a notification: the new file is
+/// already in front of the user, as with Explorer's own paste.
+fn record(message: impl Into<String>) {
+    post(message.into(), Notice::Quiet);
+}
+
+fn post(message: String, notice: Notice) {
     if let Ok(mut notices) = NOTICES.lock() {
-        notices.push((message.into(), error));
+        notices.push((message, notice));
     }
     if let Ok(window) = unsafe { FindWindowW(CLASS, None) } {
         let _ = unsafe { PostMessageW(Some(window), NOTICE, WPARAM(0), LPARAM(0)) };
     }
+}
+
+/// A result line as people read it: file names instead of the folder they
+/// are already looking at, and JustPaste's own verbs capitalized. Tool
+/// names such as yt-dlp keep their spelling.
+fn tidy(message: &str, directory: &std::path::Path) -> String {
+    let folder = directory.display().to_string();
+    let message = message
+        .replace(&format!("{}\\", folder.trim_end_matches('\\')), "")
+        .replace(&format!("{}/", folder.trim_end_matches('/')), "");
+    let first = message
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+    if !["saved", "cloned", "copied", "cancelled", "dry", "nothing"].contains(&first) {
+        return message;
+    }
+    let mut characters = message.chars();
+    characters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(characters).collect()
+    })
 }
 
 unsafe extern "system" fn keyboard(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
@@ -799,7 +847,7 @@ fn handle(request: &Request, resolver: &ShellResolver) -> Result<(), String> {
             close_on_blur: settings.picker.close_on_blur,
         })? {
             LAST_STATE.store(7, Ordering::SeqCst);
-            notify(result, false);
+            record(tidy(&result, &directory));
         }
         return Ok(());
     }
@@ -810,7 +858,7 @@ fn handle(request: &Request, resolver: &ShellResolver) -> Result<(), String> {
         return Err("cancelled".into());
     }
     let progress = crate::progress::Operation::begin();
-    progress_window::start(progress.reporter.clone(), directory.clone());
+    let card = progress_window::start(progress.reporter.clone(), directory.clone(), false);
     LAST_STATE.store(6, Ordering::SeqCst);
     let result = match action {
         Action::As(format) => actions::paste_as(format, snapshot, &directory, false),
@@ -832,10 +880,49 @@ fn handle(request: &Request, resolver: &ShellResolver) -> Result<(), String> {
         _ => super::smart_paste(snapshot, &directory, &settings, super::LinkMode::Auto),
     };
     progress.finish(&result);
-    let result = result?;
-    LAST_STATE.store(7, Ordering::SeqCst);
-    notify(result, false);
-    Ok(())
+    match result {
+        Ok(result) => {
+            LAST_STATE.store(7, Ordering::SeqCst);
+            record(tidy(&result, &directory));
+            Ok(())
+        }
+        // The visible card already shows the failure; one message is enough.
+        Err(error) if card.shown() => {
+            LAST_STATE.store(8, Ordering::SeqCst);
+            record(error);
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// One Explorer menu paste with no console window: the status card shows
+/// progress and any failure, and nothing waits for console input.
+pub(super) fn windowless(work: impl FnOnce() -> Result<String, String>) -> Result<(), String> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::System::Console::{
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    // The hidden console keeps helpers windowless, but nobody can answer a
+    // prompt in it: prompts see no terminal and fail instead of waiting.
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        let nothing = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .map_err(|e| e.to_string())?;
+        let _ = unsafe { SetStdHandle(id, HANDLE(nothing.into_raw_handle())) };
+    }
+    crate::common::set_background();
+    theme::per_monitor_dpi();
+    let directory = std::env::current_dir().map_err(|e| e.to_string())?;
+    let progress = crate::progress::Operation::begin();
+    let card = progress_window::start(progress.reporter.clone(), directory, true);
+    let result = work();
+    progress.finish(&result);
+    drop(progress);
+    card.wait();
+    result.map(|_| ())
 }
 
 /// Whether JustPaste's own handling covers `snapshot`; otherwise Explorer pastes.
@@ -943,77 +1030,68 @@ fn startup(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The status line at the top of the tray menu.
+fn tray_status(paused: bool, busy: bool) -> (&'static str, String) {
+    let shortcuts = match picker_label() {
+        "off" => "Ctrl+V".to_owned(),
+        picker => format!("Ctrl+V · {picker}"),
+    };
+    if paused {
+        ("Smart Paste is paused", "Explorer pastes".to_owned())
+    } else if busy {
+        ("Pasting…", shortcuts)
+    } else {
+        ("Smart Paste is on", shortcuts)
+    }
+}
+
+/// The tray menu as it stands right now. Command IDs are handled in [`menu`].
+fn tray_menu(point: POINT) -> Result<popup::Menu, String> {
+    use theme::glyph;
+    let paused = PAUSED.load(Ordering::SeqCst);
+    let busy = BUSY.load(Ordering::SeqCst);
+    let mut menu = popup::Menu::new(point)?;
+    let (status, hint) = tray_status(paused, busy);
+    menu.caption(glyph::PASTE, status, &hint);
+    menu.separator();
+    menu.item(6, glyph::SETTINGS, "Settings…", "", None, true);
+    if paused {
+        menu.item(1, glyph::PLAY, "Resume Smart Paste", "", None, true);
+    } else {
+        menu.item(1, glyph::PAUSE, "Pause Smart Paste", "", None, true);
+    }
+    if LAST_FOLDER.lock().is_ok_and(|folder| folder.is_some()) {
+        menu.item(7, glyph::FOLDER_OPEN, "Open last folder", "", None, true);
+    }
+    if busy {
+        menu.item(8, glyph::CANCEL, "Cancel current paste", "", None, true);
+    }
+    menu.separator();
+    menu.check(
+        2,
+        "Skip node_modules when copying",
+        setting("ignore_node_modules"),
+    );
+    menu.check(3, "Respect .gitignore when copying", setting("gitignore"));
+    menu.check(5, "Start at sign-in", startup_enabled());
+    menu.separator();
+    menu.item(9, glyph::POWER, "Quit JustPaste", "", None, true);
+    menu.default(6);
+    Ok(menu)
+}
+
 fn menu(window: HWND) -> Result<(), String> {
     unsafe {
-        let menu = CreatePopupMenu().map_err(|e| e.to_string())?;
-        let picker_line = format!("Paste as…  ·  {}", picker_label());
-        let entries = [
-            (0, "JustPaste", false, false),
-            (0, "Images, text, links && files  ·  Ctrl+V", false, false),
-            (0, &picker_line, false, false),
-            (6, "Open settings…", false, true),
-            (
-                1,
-                if PAUSED.load(Ordering::SeqCst) {
-                    "Resume Smart Paste"
-                } else {
-                    "Pause Smart Paste"
-                },
-                false,
-                true,
-            ),
-            (0, "", false, false),
-            (
-                2,
-                "Ignore node_modules",
-                setting("ignore_node_modules"),
-                true,
-            ),
-            (3, "Respect .gitignore", setting("gitignore"), true),
-            (0, "", false, false),
-            (5, "Start at sign-in", startup_enabled(), true),
-            (
-                7,
-                "Open last folder",
-                false,
-                LAST_FOLDER.lock().is_ok_and(|p| p.is_some()),
-            ),
-            (
-                8,
-                "Cancel current paste",
-                false,
-                BUSY.load(Ordering::SeqCst),
-            ),
-            (0, "", false, false),
-            (9, "Quit JustPaste", false, true),
-        ];
-        for (id, label, checked, enabled) in entries {
-            let label: &str = label;
-            let flags = if label.is_empty() {
-                MF_SEPARATOR
-            } else {
-                MF_STRING
-            } | if checked { MF_CHECKED } else { MF_UNCHECKED }
-                | if enabled { MF_ENABLED } else { MF_GRAYED };
-            let label = wide(std::ffi::OsStr::new(label));
-            let _ = AppendMenuW(menu, flags, id, PCWSTR(label.as_ptr()));
-        }
-        let _ = SetMenuDefaultItem(menu, 6, 0);
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
+        let menu = tray_menu(point)?;
         let _ = SetForegroundWindow(window);
-        let chosen = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
-            point.x,
-            point.y,
-            Some(0),
+        let chosen = menu.show(
             window,
-            None,
-        )
-        .0;
-        let _ = DestroyMenu(menu);
-        let _ = PostMessageW(Some(window), WM_NULL, WPARAM(0), LPARAM(0));
+            point,
+            TPM_RIGHTBUTTON | TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
+        );
+        drop(menu);
         match chosen {
             1 => {
                 PAUSED.fetch_xor(true, Ordering::SeqCst);
@@ -1086,22 +1164,30 @@ unsafe extern "system" fn procedure(
         NOTICE => {
             if let Ok(mut notices) = NOTICES.lock() {
                 // Show the most recent state, not an obsolete queued progress message.
-                if let Some((message, error)) = notices.pop() {
+                if let Some((message, notice)) = notices.pop() {
                     notices.clear();
                     let mut data = icon(window);
                     data.uFlags = NIF_INFO;
-                    data.dwInfoFlags = if error { NIIF_ERROR } else { NIIF_INFO };
+                    data.dwInfoFlags = match notice {
+                        Notice::Error => NIIF_ERROR,
+                        _ => NIIF_USER | NIIF_LARGE_ICON | NIIF_RESPECT_QUIET_TIME,
+                    };
+                    data.hBalloonIcon = app_icon(unsafe { GetSystemMetrics(SM_CXICON) });
                     fill(&mut data.szInfoTitle, "JustPaste");
                     fill(&mut data.szInfo, &message);
                     unsafe {
                         let title = wide(std::ffi::OsStr::new(&message));
                         let _ = SetWindowTextW(window, PCWSTR(title.as_ptr()));
-                        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+                        if notice != Notice::Quiet {
+                            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+                        }
                     }
                 }
             }
             LRESULT(0)
         }
+        WM_MENUCHAR => popup::menu_char(wparam)
+            .unwrap_or_else(|| unsafe { DefWindowProcW(window, message, wparam, lparam) }),
         WM_TIMER => {
             if EXITING.load(Ordering::SeqCst)
                 && !BUSY.load(Ordering::SeqCst)
@@ -1147,6 +1233,7 @@ unsafe extern "system" fn procedure(
 
 fn background() -> Result<(), String> {
     crate::common::set_background();
+    theme::per_monitor_dpi();
     unsafe {
         // Named mutex is scoped to this login session. Only one hook owns paste.
         let mutex = CreateMutexW(None, false, w!("Local\\JustTools.SmartPaste.v1"))
@@ -1236,13 +1323,12 @@ fn background() -> Result<(), String> {
         SetTimer(Some(window), 1, 1000, None);
         SetPropW(window, w!("JustPaste.Ready"), Some(HANDLE(window.0)))
             .map_err(|e| e.to_string())?;
-        notify(
-            format!(
-                "Smart Paste is ready. Ctrl+V saves images and links in Explorer; {} picks a format. Click the tray icon for settings.",
-                picker_label()
-            ),
-            false,
-        );
+        // Starting is not news, least of all at every sign-in: `--enable`
+        // already confirms it, and the tray icon is there.
+        record(format!(
+            "Smart Paste is ready. Ctrl+V saves images and links in Explorer; {} picks a format.",
+            picker_label()
+        ));
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&message);
@@ -1400,6 +1486,36 @@ mod tests {
         assert_eq!(chord(false, false, false, true, 2), 0);
         assert_eq!(chord(true, false, false, true, 2), 0);
         assert_eq!(chord(true, true, false, false, 0), 0);
+    }
+
+    #[test]
+    fn result_lines_name_files_not_the_folder_on_screen() {
+        let folder = std::path::Path::new(r"C:\Users\Ada\Downloads");
+        assert_eq!(
+            tidy(r"saved C:\Users\Ada\Downloads\Image 1.png", folder),
+            "Saved Image 1.png"
+        );
+        assert_eq!(
+            tidy(r"saved C:\Users\Ada\Other\a.png", folder),
+            r"Saved C:\Users\Ada\Other\a.png"
+        );
+        // Tool names keep their own spelling.
+        assert_eq!(tidy("yt-dlp failed", folder), "yt-dlp failed");
+        assert_eq!(tidy("2 saved, 1 cloned", folder), "2 saved, 1 cloned");
+    }
+
+    #[test]
+    fn the_tray_status_names_both_shortcuts_unless_paused() {
+        PICKER_KEY.store(1, Ordering::SeqCst);
+        assert_eq!(
+            tray_status(false, false),
+            ("Smart Paste is on", "Ctrl+V · Ctrl+Shift+V".to_owned())
+        );
+        assert_eq!(tray_status(false, true).0, "Pasting…");
+        assert_eq!(tray_status(true, false).0, "Smart Paste is paused");
+        PICKER_KEY.store(0, Ordering::SeqCst);
+        assert_eq!(tray_status(false, false).1, "Ctrl+V");
+        PICKER_KEY.store(1, Ordering::SeqCst);
     }
 
     #[test]

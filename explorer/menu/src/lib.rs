@@ -589,6 +589,9 @@ pub struct Action {
     pub minimum: u32,
     /// The result is something to read, so the window stays open.
     pub hold: bool,
+    /// Runs without a console window: the tool shows its own native progress
+    /// and result instead, and never waits for console input.
+    pub windowless: bool,
 }
 
 const fn headless(id: &'static str, tool: Tool, args: &'static [&'static str]) -> Action {
@@ -601,6 +604,7 @@ const fn headless(id: &'static str, tool: Tool, args: &'static [&'static str]) -
         per_file: false,
         minimum: 1,
         hold: false,
+        windowless: false,
     }
 }
 
@@ -697,7 +701,10 @@ const ACTIONS: &[Action] = &[
         ..headless("zip.preview", Tool::Zip, &["--dry-run"])
     },
     launcher("zip.options", Tool::Zip),
-    headless("paste", Tool::Paste, &["--clipboard", "--saved-settings"]),
+    Action {
+        windowless: true,
+        ..headless("paste", Tool::Paste, &["--clipboard", "--saved-settings"])
+    },
     launcher_here("folder.optimize", Tool::Optimize),
     launcher_here("folder.resize", Tool::Resize),
     launcher_here("folder.webp", Tool::Webp),
@@ -713,6 +720,7 @@ const ACTIONS: &[Action] = &[
         per_file: false,
         minimum: 0,
         hold: false,
+        windowless: false,
     },
 ];
 
@@ -876,6 +884,14 @@ mod tests {
         assert_eq!(
             action("paste").unwrap().args,
             ["--clipboard", "--saved-settings"].as_slice()
+        );
+        // Pasting is quick and reports natively; only it skips the console.
+        assert!(action("paste").unwrap().windowless);
+        assert!(
+            ACTIONS
+                .iter()
+                .filter(|action| action.windowless)
+                .all(|action| action.id == "paste" && action.run == Run::Headless)
         );
         assert_eq!(menu(&plain)[2].title, "JustOptimize in this folder…");
         assert_eq!(action("folder.video").unwrap().run, Run::LauncherHere);

@@ -460,6 +460,8 @@ into multi-entry links, and `--dry-run` makes no request. Use `justvideo` or
 justpaste --clipboard --as md          # rich text keeps structure; also txt, html, json
 printf 'a,b\n1,2\n' | justpaste --as json
 justpaste --clipboard --as webp        # image formats: png, jpg (flattened on white), webp
+justpaste --clipboard --as rmbg        # JustRMBG -> a new transparent PNG; keeps sources
+justpaste --as rmbg --copy portrait.jpg -o cutouts
 justpaste --clipboard --as ocr         # Windows OCR, local
 justpaste --as mp3 --copy talk.mov     # or mp4; links download then transcode
 justpaste --clipboard --ai "Summarize in 3 bullets" --ai-service anthropic --dry-run
@@ -481,10 +483,22 @@ moderation first unless `--no-ai-moderation`. Answers save as `.txt` unless
 `--as md|html|json`; `--dry-run` sends nothing. Saved custom actions
 (`Name: instruction` lines) need `--saved-settings`.
 
+The picker and bare launcher's **Paste with removed background** option uses
+`--as rmbg`. Image data saves as `Image <date time>-nobg.png`; copied still-image
+files save as `<source>-nobg.png`, numbered when taken. Dimensions and sources
+are kept. Mixed selections, folders, and cuts are rejected. RMBG dependencies
+keep their confirmation; run bare `justrmbg` in a terminal to approve missing
+runtime/model installation before using the background picker. This action is
+one-run and follows the **Offer file formats and background removal** setting.
+
 On Windows, Smart Paste's Ctrl+V uses one saved choice per clipboard kind
 (text, image, links, audio/video files), and one picker shortcut
 (Ctrl+Shift+V by default, configurable or off) lists every fitting action.
 `--clipboard --saved-settings` follows the same saved Ctrl+V choices.
+The picker is a native menu: icons, grouped actions, number keys 1–9/0 on the
+right, the Ctrl+V choice in bold, and light/dark theme. Explorer's
+**JustPaste · paste here** runs that headless command without a console window
+and reports progress and failures on the progress card.
 
 ## Structured and document examples
 
@@ -531,9 +545,13 @@ virtual files stay native. Ctrl+V reaches Explorer untouched unless the
 clipboard holds an image, text, or (filters on) copied files. Filtered copies
 use the system copy, several files at once, and keep modified times. Explorer's built-in mouse Paste remains native;
 use **JustPaste** in the right-click menu to apply the same filters.
-Long Smart Paste operations show a delayed progress window with stage, elapsed
-time, stream download progress, and Cancel. Closing it hides the window without
-cancelling. yt-dlp is fetched with vendor checksum verification when missing;
+Long Smart Paste operations show a delayed progress card (bottom center, no
+focus) with the stage, stream download progress, and Cancel; its × hides the
+card without cancelling. Successful pastes raise no notification and failures
+already on the card raise no second one; `--status` still records both.
+On Windows 11 24H2+, `--enable`, `--settings`, `--disable`, `--startup`, and the
+sign-in start open no console window; other commands started outside a
+terminal still get one. yt-dlp is fetched with vendor checksum verification when missing;
 successful update checks last twelve hours, failures retry after fifteen minutes.
 The resident checks this schedule every fifteen minutes. Updates and downloads
 share a per-executable lock; update checks time out after ninety seconds.

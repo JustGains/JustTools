@@ -24,6 +24,7 @@ pub enum Format {
     Png,
     Jpg,
     Webp,
+    Rmbg,
     Ocr,
     Mp3,
     Mp4,
@@ -31,7 +32,7 @@ pub enum Format {
 
 impl Format {
     #[cfg(any(windows, test))]
-    pub const ALL: [Format; 10] = [
+    pub const ALL: [Format; 11] = [
         Format::Txt,
         Format::Md,
         Format::Html,
@@ -39,6 +40,7 @@ impl Format {
         Format::Png,
         Format::Jpg,
         Format::Webp,
+        Format::Rmbg,
         Format::Ocr,
         Format::Mp3,
         Format::Mp4,
@@ -53,6 +55,7 @@ impl Format {
             "png" => Format::Png,
             "jpg" | "jpeg" => Format::Jpg,
             "webp" => Format::Webp,
+            "rmbg" => Format::Rmbg,
             "ocr" => Format::Ocr,
             "mp3" => Format::Mp3,
             "mp4" => Format::Mp4,
@@ -69,6 +72,7 @@ impl Format {
             Format::Png => "png",
             Format::Jpg => "jpg",
             Format::Webp => "webp",
+            Format::Rmbg => "rmbg",
             Format::Ocr => "ocr",
             Format::Mp3 => "mp3",
             Format::Mp4 => "mp4",
@@ -84,6 +88,7 @@ impl Format {
             Format::Png => "PNG image",
             Format::Jpg => "JPEG image",
             Format::Webp => "WebP image",
+            Format::Rmbg => "Paste with removed background",
             Format::Ocr => "Text from image (.txt)",
             Format::Mp3 => "Transcode to MP3",
             Format::Mp4 => "Transcode to MP4",
@@ -95,7 +100,10 @@ impl Format {
     }
 
     fn image(self) -> bool {
-        matches!(self, Format::Png | Format::Jpg | Format::Webp | Format::Ocr)
+        matches!(
+            self,
+            Format::Png | Format::Jpg | Format::Webp | Format::Rmbg | Format::Ocr
+        )
     }
 
     fn media(self) -> bool {
@@ -112,6 +120,7 @@ impl Format {
             }
             Snapshot::Image(..) => self.image() && (self != Format::Ocr || cfg!(windows)),
             Snapshot::Files { paths, cut: false } => match self {
+                Format::Rmbg => super::background::supports_files(paths),
                 Format::Mp3 => !paths.is_empty() && paths.iter().all(|p| media(p).is_some()),
                 Format::Mp4 => !paths.is_empty() && paths.iter().all(|p| media(p) == Some(true)),
                 _ => false,
@@ -368,6 +377,38 @@ pub struct Entry {
     pub action: Action,
 }
 
+#[cfg(windows)]
+impl Entry {
+    /// The picker's group for this entry; a separator falls between groups.
+    pub fn section(&self) -> u8 {
+        match &self.action {
+            Action::Native => 0,
+            Action::Smart | Action::PageMarkdown => 1,
+            Action::As(format) if format.text() => 2,
+            Action::As(Format::Png | Format::Jpg | Format::Webp) => 3,
+            Action::As(Format::Rmbg | Format::Ocr) => 4,
+            Action::As(_) => 5,
+            Action::Ai { .. } => 6,
+        }
+    }
+}
+
+/// What JustPaste's own handling does with copied links, in a few words.
+#[cfg(any(windows, test))]
+fn links_label(links: &[String]) -> String {
+    let repositories = links
+        .iter()
+        .filter(|link| super::git::repository(link).is_some())
+        .count();
+    match (links.len(), repositories) {
+        (1, 1) => "Clone repository".into(),
+        (count, all) if all == count => format!("Clone {count} repositories"),
+        (1, 0) => "Download link".into(),
+        (count, 0) => format!("Download {count} links"),
+        _ => "Download and clone links".into(),
+    }
+}
+
 /// Every action that fits `snapshot`, in picker order.
 #[cfg(any(windows, test))]
 pub fn entries(snapshot: &Snapshot, settings: &Settings, cloudflare: bool) -> Vec<Entry> {
@@ -377,18 +418,19 @@ pub fn entries(snapshot: &Snapshot, settings: &Settings, cloudflare: bool) -> Ve
         action: Action::Native,
     }];
     let text = snapshot.text();
-    let links = text.is_some_and(|text| !super::links(text).is_empty());
+    let copied = text.map(super::links).unwrap_or_default();
+    let links = !copied.is_empty();
     let smart = match snapshot {
         Snapshot::Image(..) => None,
-        _ if links => Some("Download links / clone repositories"),
+        _ if links => Some(links_label(&copied)),
         Snapshot::Files { cut: false, .. } if settings.filters() => {
-            Some("Copy with JustPaste filters")
+            Some("Copy with JustPaste filters".into())
         }
         _ => None,
     };
     if let Some(label) = smart {
         entries.push(Entry {
-            label: label.into(),
+            label,
             action: Action::Smart,
         });
     }
@@ -406,7 +448,12 @@ pub fn entries(snapshot: &Snapshot, settings: &Settings, cloudflare: bool) -> Ve
         };
         if shown && format.fits(snapshot) {
             entries.push(Entry {
-                label: format.label().into(),
+                label: match format {
+                    // Links are downloaded first, so nothing is transcoded in place.
+                    Format::Mp3 if links => "Download as MP3".into(),
+                    Format::Mp4 if links => "Download as MP4".into(),
+                    _ => format.label().into(),
+                },
                 action: Action::As(format),
             });
         }
@@ -450,18 +497,30 @@ pub fn preview(snapshot: &Snapshot) -> String {
         Snapshot::Image(bytes, format) => {
             image::ImageReader::with_format(std::io::Cursor::new(bytes), *format)
                 .into_dimensions()
-                .map_or_else(|_| "Image".into(), |(w, h)| format!("Image  {w} × {h}"))
+                .map_or_else(|_| "Image".into(), |(w, h)| format!("Image · {w} × {h}"))
         }
         Snapshot::Files { paths, cut } => format!(
             "{} {}{}",
             paths.len(),
             if paths.len() == 1 { "item" } else { "items" },
-            if *cut { " (cut)" } else { "" }
+            if *cut { " · cut" } else { " · copied" }
         ),
         Snapshot::Text(text) | Snapshot::Html { text, .. } => {
-            let links = super::links(text).len();
-            if links > 0 {
-                return format!("{links} {}", if links == 1 { "link" } else { "links" });
+            let links = super::links(text);
+            if !links.is_empty() {
+                let mut hosts: Vec<&str> = Vec::new();
+                for link in &links {
+                    let host = host(link);
+                    if !hosts.contains(&host) {
+                        hosts.push(host);
+                    }
+                }
+                let more = if hosts.len() > 2 { ", …" } else { "" };
+                hosts.truncate(2);
+                return match links.len() {
+                    1 => format!("Link · {}", hosts[0]),
+                    count => format!("{count} links · {}{more}", hosts.join(", ")),
+                };
             }
             let line: String = text
                 .split_whitespace()
@@ -472,11 +531,11 @@ pub fn preview(snapshot: &Snapshot) -> String {
                 .collect();
             let more = text.split_whitespace().map(str::len).sum::<usize>() > line.len();
             format!(
-                "{}“{line}{}”",
+                "{} · “{line}{}”",
                 if matches!(snapshot, Snapshot::Html { .. }) {
-                    "Rich text  "
+                    "Rich text"
                 } else {
-                    "Text  "
+                    "Text"
                 },
                 if more { "…" } else { "" }
             )
@@ -485,7 +544,19 @@ pub fn preview(snapshot: &Snapshot) -> String {
     }
 }
 
-fn stamp() -> String {
+/// The site a link points to, without `www.`, credentials, or port.
+#[cfg(any(windows, test))]
+fn host(link: &str) -> &str {
+    let rest = link.split_once("://").map_or(link, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = authority.split(':').next().unwrap_or(authority);
+    host.strip_prefix("www.").unwrap_or(host)
+}
+
+pub(super) fn stamp() -> String {
     chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string()
 }
 
@@ -533,6 +604,8 @@ pub fn paste_as(
             format.label(),
             if format.text() {
                 "text"
+            } else if format == Format::Rmbg {
+                "an image or copied still-image files"
             } else if format.image() {
                 "an image"
             } else if format == Format::Mp4 {
@@ -541,6 +614,9 @@ pub fn paste_as(
                 "copied audio/video files or links"
             }
         ));
+    }
+    if format == Format::Rmbg {
+        return super::background::paste(snapshot, directory, dry_run);
     }
     if format.media() {
         let sources: Vec<OsString> = match snapshot {
@@ -967,10 +1043,83 @@ mod tests {
                 .all(|l| !l.contains("AI") && l != ai::FIX_SPELLING)
         );
         assert!(labels(&settings, &image).contains(&"WebP image".to_owned()));
+        assert!(labels(&settings, &image).contains(&"Paste with removed background".to_owned()));
+        settings.picker.paste_as_file = false;
+        assert!(!labels(&settings, &image).contains(&"Paste with removed background".to_owned()));
         assert!(preview(&image).contains("4 × 3"));
         assert_eq!(
             preview(&Snapshot::Text("a https://x.test b".into())),
-            "1 link"
+            "Link · x.test"
         );
+        assert_eq!(
+            preview(&Snapshot::Text(
+                "https://www.youtube.com/watch?v=1 https://youtu.be/2 git@github.com:me/app.git https://user@forge.test:8443/a"
+                    .into()
+            )),
+            "4 links · youtube.com, youtu.be, …"
+        );
+        assert_eq!(host("git@github.com:me/app.git"), "github.com");
+        assert_eq!(host("https://user@forge.test:8443/a/@b"), "forge.test");
+    }
+
+    #[test]
+    fn background_removal_is_offered_only_for_images_and_copied_still_images() {
+        let directory = tempfile::tempdir().unwrap();
+        let photo = directory.path().join("portrait.PNG");
+        let text = directory.path().join("note.txt");
+        fs::write(&photo, png()).unwrap();
+        fs::write(&text, "keep").unwrap();
+        let snapshots = [
+            (Snapshot::Image(png(), image::ImageFormat::Png), true),
+            (
+                Snapshot::Files {
+                    paths: vec![photo.clone()],
+                    cut: false,
+                },
+                true,
+            ),
+            (
+                Snapshot::Files {
+                    paths: vec![photo.clone()],
+                    cut: true,
+                },
+                false,
+            ),
+            (
+                Snapshot::Files {
+                    paths: vec![photo, text],
+                    cut: false,
+                },
+                false,
+            ),
+            (
+                Snapshot::Files {
+                    paths: vec![directory.path().to_path_buf()],
+                    cut: false,
+                },
+                false,
+            ),
+            (
+                Snapshot::Files {
+                    paths: Vec::new(),
+                    cut: false,
+                },
+                false,
+            ),
+            (
+                Snapshot::Text("https://example.com/portrait.png".into()),
+                false,
+            ),
+            (Snapshot::Unsupported, false),
+        ];
+        for (snapshot, expected) in snapshots {
+            assert_eq!(Format::Rmbg.fits(&snapshot), expected);
+            assert_eq!(
+                entries(&snapshot, &Settings::default(), false)
+                    .iter()
+                    .any(|entry| entry.action == Action::As(Format::Rmbg)),
+                expected
+            );
+        }
     }
 }
